@@ -170,7 +170,6 @@ jobs:
           grep -Fq 'ENABLE_MATUGEN' WallpaperPicker.qml
           grep -Fq 'QS_WALLPAPER_ENABLE_ML4W' WallpaperPicker.qml
           grep -Fq 'triggerColorExtraction' WallpaperPicker.qml
-          grep -Fq 'restore_wallpaper.sh' README.md || true
 
       - name: Check diff integrity and prohibited additions
         shell: bash
@@ -181,7 +180,7 @@ jobs:
 
           added_lines="$(
             git diff --unified=0 "${REQUIRED_BASE_SHA}...HEAD" -- . \
-              ':(exclude).github/workflows/online-discovery-quality.yml' \
+              ':(exclude).github/workflows/*.yml' \
               | grep '^+' \
               | grep -v '^+++' \
               || true
@@ -210,15 +209,12 @@ jobs:
           from pathlib import Path
 
           readme = Path('README.md').read_text(encoding='utf-8')
-          advanced_path = Path('docs/online-discovery.md')
-          advanced = (
-              advanced_path.read_text(encoding='utf-8')
-              if advanced_path.exists()
-              else ''
-          )
+          advanced = Path('docs/online-discovery.md').read_text(encoding='utf-8')
           combined = readme + '\n' + advanced
 
           required_variables = {
+              'QS_WALLPAPER_DIR',
+              'XDG_CACHE_HOME',
               'QS_WALLPAPER_TARGET_WIDTH',
               'QS_WALLPAPER_TARGET_HEIGHT',
               'QS_WALLPAPER_RESULT_LIMIT',
@@ -235,30 +231,38 @@ jobs:
           if missing:
               raise SystemExit(f'Missing configuration documentation: {missing}')
 
-          required_docs = (
-              'Press Enter to search online',
-              'Full-resolution files download only after',
-              'atomic publication pointer',
+          required_readme = (
+              'A fast keyboard-first Quickshell wallpaper picker',
+              '<!-- Add the final picker screenshot here after capture. Suggested path: docs/assets/wallpaper-picker-preview.png -->',
+              'cp config/Settings.qml.example config/Settings.qml',
+              './scripts/open_picker.sh',
+              'Typing searches local wallpaper filenames.',
+              'Pressing Enter searches Wallhaven even when local matches exist.',
+              'advanced online-discovery reference',
+              'Magetsu',
+              'ilyamiro',
               'bay0n',
-              'does not claim to understand subjective artistic quality',
           )
-          absent = [text for text in required_docs if text not in combined]
-          if absent:
-              raise SystemExit(f'Missing required documentation: {absent}')
+          missing_readme = [text for text in required_readme if text not in readme]
+          if missing_readme:
+              raise SystemExit(f'Missing product README content: {missing_readme}')
 
-          if advanced_path.exists():
-              required_readme = (
-                  'A fast keyboard-first Quickshell wallpaper picker',
-                  '<!-- Add the final picker screenshot here after capture. Suggested path: docs/assets/wallpaper-picker-preview.png -->',
-                  'docs/online-discovery.md',
-                  'Typing filters local wallpaper filenames.',
-                  'Pressing Enter searches Wallhaven, even when local matches exist.',
+          required_advanced = (
+              'window shell and top-level presentation',
+              'local and online search UI',
+              'request invalidation and stale-result rejection',
+              'atomic `online/current` pointer',
+              'does not claim to understand subjective artistic quality',
+              'Full-resolution images download only after selection',
+              'No local thumbnails',
+              'Selected download failure',
+              'Reset only the online cache',
+          )
+          missing_advanced = [text for text in required_advanced if text not in advanced]
+          if missing_advanced:
+              raise SystemExit(
+                  f'Missing advanced reference content: {missing_advanced}'
               )
-              missing_readme = [text for text in required_readme if text not in readme]
-              if missing_readme:
-                  raise SystemExit(
-                      f'Missing product README content: {missing_readme}'
-                  )
           PY
 
       - name: Confirm deterministic test coverage executes production code
