@@ -1,88 +1,100 @@
 # QS Wallpaper Picker
 
-A fast keyboard-first Quickshell wallpaper picker with local image and video support, color filters, animated previews and quality-ranked Wallhaven search.
+A fast, keyboard-first wallpaper picker for Hyprland, built with Quickshell.
 
-<!-- Add the final picker screenshot here after capture. Suggested path: docs/assets/wallpaper-picker-preview.png -->
+Browse local images and videos, filter by color, enjoy animated previews, and discover display-aware Wallhaven wallpapers without leaving the picker.
 
-## Primary features
+
+<img width="2560" height="1600" alt="preview" src="https://github.com/user-attachments/assets/d14fce0d-4ef9-4cca-8c41-94e4ffd893bd" />
+</p>
+
+## Highlights
 
 - Keyboard-first wallpaper browsing
-- Local image wallpapers
-- Local video wallpapers
-- Animated image and video previews
+- Local image and video support
+- Smooth animated previews
 - Color-based filtering
 - Explicit local and online search
-- Display-aware ranked Wallhaven results
-- Preview-first safe full-resolution downloads
+- Display-aware Wallhaven ranking
+- Preview-first online browsing
+- Validated full-resolution downloads
 
-## Quick installation
+## Quick start
 
 ```bash
 git clone https://github.com/magetsu002/qs-wallpaper-picker.git
 cd qs-wallpaper-picker
+
 cp config/Settings.qml.example config/Settings.qml
 mkdir -p "$HOME/Wallpapers"
+
 ./scripts/open_picker.sh
 ```
 
-The tracked template is [`config/Settings.qml.example`](config/Settings.qml.example). Edit your copied, ignored `config/Settings.qml` for local preferences.
+Add your wallpapers to `$HOME/Wallpapers`, or configure another directory before launching.
 
-## Launching
-
-Use the launcher for normal operation:
-
-```bash
-./scripts/open_picker.sh
-```
-
-It resolves the project path, synchronizes thumbnails, initializes the XDG-aware cache contract, prevents duplicate picker instances and launches `Main.qml`.
-
-Direct launch is an advanced alternative after setup:
-
-```bash
-quickshell -p Main.qml
-```
+The tracked configuration template is [`config/Settings.qml.example`](config/Settings.qml.example). Your copied `config/Settings.qml` contains local preferences and is ignored by Git.
 
 ## Hyprland keybind
 
-Use the absolute repository path so the launcher can resolve every supporting file:
+Use the absolute path to the launcher:
 
 ```ini
 bind = SUPER, W, exec, /absolute/path/to/qs-wallpaper-picker/scripts/open_picker.sh
 ```
 
+The launcher resolves the project path, creates the wallpaper directory when needed, synchronizes thumbnails, initializes cache compatibility, prevents duplicate picker instances, and launches the correct QML entry point.
+
+<details>
+<summary>Manual launch</summary>
+
+After configuration and thumbnail synchronization, the picker can also be launched directly:
+
+```bash
+quickshell -p Main.qml
+```
+
+The repository launcher is recommended for normal use.
+
+</details>
+
 ## Controls
 
-- **Left / Right** — move between wallpapers
-- **Enter** — apply the selected wallpaper
-- **Tab / Shift+Tab** — move between filters
-- **Typing in Search** — filter local filenames
-- **Enter in Search** — search Wallhaven
-- **Escape in Search** — return to All
-- **Escape elsewhere** — close the picker
-- **Mouse click** — select and apply
+| Input | Action |
+| --- | --- |
+| **Left / Right** | Move between wallpapers |
+| **Enter** | Apply the selected wallpaper |
+| **Tab / Shift+Tab** | Move between filters |
+| **Type in Search** | Filter local filenames |
+| **Enter in Search** | Search Wallhaven |
+| **Escape in Search** | Return to the All filter |
+| **Escape elsewhere** | Close the picker |
+| **Mouse click** | Select and apply a wallpaper |
 
-## Local versus online search
+## Local and online search
 
-Typing searches local wallpaper filenames.
+**Typing searches your local wallpaper filenames.**
 
-Pressing Enter searches Wallhaven even when local matches exist.
+**Pressing Enter searches Wallhaven, even when local matches exist.**
 
-Online search downloads validated previews first. The full-resolution image is downloaded only after selection, through the validated production downloader. A failed download does not apply a partial file or close the picker as though it succeeded.
+Online candidates are filtered and ranked using display dimensions, aspect-ratio fit, resolution, popularity signals, metadata validity, and preview validation.
+
+Only lightweight previews are downloaded during search. The full-resolution image is downloaded after selection through the validated production downloader.
+
+Failed downloads do not apply partial files, replace valid wallpapers, or close the picker as though the operation succeeded.
 
 ## Requirements
 
-### Required for normal image usage
+### Normal image usage
 
-- Linux
-- Hyprland
+- Linux with Hyprland
 - [Quickshell](https://quickshell.org/)
 - Bash
-- Python 3.12, the version certified by CI
+- Python 3.12, as certified by CI
 - `awww` for image wallpaper application and transitions
-- ImageMagick (`magick`) for local image thumbnails and color extraction
+- ImageMagick (`magick`) for image thumbnails and color extraction
 
-### Required for video support
+### Video support
 
 - `ffmpeg` for video thumbnail generation
 - `mpvpaper` for video wallpaper playback
@@ -91,91 +103,153 @@ Online search downloads validated previews first. The full-resolution image is d
 
 - Matugen for dynamic colors
 - ML4W synchronization
-- Waybar, Kitty, Cava, SwayNC and SwayOSD reload targets
-- `hyprctl`, `wlr-randr` or `xrandr` for display detection; a safe fallback exists
+- Waybar, Kitty, Cava, SwayNC, and SwayOSD reload targets
+- `hyprctl`, `wlr-randr`, or `xrandr` for display detection
 
-### Development and testing
+A safe display-size fallback is used when no supported detection utility is available.
 
-- Python standard library
-- Bash
-- Git
+Wallhaven search requires no account, API key, cloud AI service, GPU model, or third-party Python package.
 
-Wallhaven search requires no account, API key, cloud AI service, GPU model or third-party Python package.
+## Configuration
 
-## Basic configuration
+Most users only need their copied file:
 
-Create the local settings file once:
-
-```bash
-cp config/Settings.qml.example config/Settings.qml
+```text
+config/Settings.qml
 ```
 
-Useful environment overrides before launching include:
+Common environment overrides:
 
 ```bash
 export QS_WALLPAPER_DIR="$HOME/Pictures/Wallpapers"
 export QS_WALLPAPER_RESULT_LIMIT=12
 export QS_WALLPAPER_CANDIDATE_LIMIT=72
 export QS_WALLPAPER_SEARCH_JOBS=6
+
 ./scripts/open_picker.sh
 ```
 
-The wallpaper directory falls back to `$HOME/Wallpapers`. `XDG_CACHE_HOME` is honored when set; otherwise cache state uses `$HOME/.cache/wallpaper_picker`.
+| Variable | Default | Purpose |
+| --- | --- | --- |
+| `QS_WALLPAPER_DIR` | `$HOME/Wallpapers` | Local wallpaper directory |
+| `QS_WALLPAPER_RESULT_LIMIT` | `12` | Maximum displayed online results |
+| `QS_WALLPAPER_CANDIDATE_LIMIT` | `72` | Maximum raw online candidate budget |
+| `QS_WALLPAPER_SEARCH_JOBS` | `6` | Concurrent preview workers |
+| `QS_WALLPAPER_ENABLE_ML4W` | disabled | Enables optional ML4W synchronization |
 
-Optional desktop integrations are disabled in the public settings template. Enable only the integrations you use by changing the corresponding `enable...` properties in your copied `config/Settings.qml`. ML4W synchronization is separately opt-in with `QS_WALLPAPER_ENABLE_ML4W=1`.
+`XDG_CACHE_HOME` is honored when configured. Otherwise, picker state is stored under:
+
+```text
+$HOME/.cache/wallpaper_picker
+```
+
+Optional desktop integrations are disabled in the public settings template. Enable only the integrations installed on your system.
 
 ## Troubleshooting
 
-### No local wallpapers appear
+<details>
+<summary><strong>No local wallpapers appear</strong></summary>
 
-Confirm files exist in `QS_WALLPAPER_DIR` or the `wallpaperDir` configured in your copied settings file, then launch with `./scripts/open_picker.sh`.
+Confirm your wallpaper files exist in `QS_WALLPAPER_DIR` or in the `wallpaperDir` configured inside your copied `config/Settings.qml`.
 
-### Image thumbnails do not appear
+Then relaunch with:
 
-Install ImageMagick and confirm `magick` is available. The launcher regenerates missing or outdated thumbnails.
+```bash
+./scripts/open_picker.sh
+```
 
-### Video thumbnails do not appear
+</details>
 
-Install `ffmpeg`. Video playback additionally requires `mpvpaper`.
+<details>
+<summary><strong>Image thumbnails do not appear</strong></summary>
 
-### Online search returns no results
+Install ImageMagick and confirm that `magick` is available:
 
-Try a broader query. Candidates can also be rejected for display dimensions, orientation, aspect ratio, metadata or preview validation.
+```bash
+magick -version
+```
 
-### Online search times out
+The launcher regenerates missing or outdated thumbnails.
 
-Check network access to Wallhaven and increase the validated timeout variables only when necessary. See the advanced reference.
+</details>
 
-### Download failed
+<details>
+<summary><strong>Video thumbnails do not appear</strong></summary>
 
-Retry the selection after confirming the destination wallpaper directory is writable. The previous file and online cache remain protected.
+Install `ffmpeg` for thumbnail generation.
 
-### Colors reload unexpectedly
+Applying video wallpapers additionally requires `mpvpaper`.
 
-Keep the optional integration flags disabled or check for external color-generation watchers and reload scripts.
+</details>
 
-> Avoid running multiple automatic color generators simultaneously because competing watchers may overwrite Hyprland or Waybar color files.
+<details>
+<summary><strong>Online search returns no results</strong></summary>
+
+Try a broader query.
+
+Candidates may also be rejected because of insufficient resolution, portrait orientation, display-ratio mismatch, malformed metadata, unsafe URLs, or invalid previews.
+
+</details>
+
+<details>
+<summary><strong>Online search times out</strong></summary>
+
+Confirm that Wallhaven is reachable from your network.
+
+Validated timeout and retry settings are documented in the advanced reference.
+
+</details>
+
+<details>
+<summary><strong>An online wallpaper fails to download</strong></summary>
+
+Confirm that the wallpaper directory exists and is writable, then retry the selection.
+
+Failed downloads preserve the previous wallpaper and online result cache.
+
+</details>
+
+<details>
+<summary><strong>Colors reload unexpectedly</strong></summary>
+
+Keep unused integration flags disabled and check for external Matugen, pywal, or custom watcher processes.
+
+Avoid running multiple automatic color generators simultaneously. Competing watchers may overwrite Hyprland or Waybar color files.
+
+</details>
 
 ## Advanced documentation
 
-See the [advanced online-discovery reference](docs/online-discovery.md) for ranking, cache safety, configuration and testing details.
+See the [advanced online-discovery reference](docs/online-discovery.md) for:
+
+- retrieval and ranking behavior
+- quality filters
+- cache and publication safety
+- full configuration reference
+- download validation
+- networking and privacy
+- testing and troubleshooting
 
 ## Privacy
 
 - Online search sends the normalized query and display constraints to Wallhaven.
-- Preview images download during explicit online search.
+- Validated previews download during an explicit online search.
 - Full-resolution images download only after selection.
-- Local wallpaper filenames and personal account data are not transmitted.
+- Local wallpaper filenames are not transmitted.
+- Personal account data is not required or transmitted.
 - No cloud AI service or online account is required.
 
 ## Credits
 
 Created and maintained by **Magetsu**.
 
-Original UI design adapted from [ilyamiro's NixOS configuration](https://github.com/ilyamiro/nixos-configuration).
+### Original interface
 
-Original online-search contribution by **bay0n**. The quality-ranking engine builds on that contribution, and existing Git co-author attribution remains preserved.
+The carousel-style wallpaper picker interface was adapted from the wallpaper picker design in [ilyamiro’s NixOS configuration](https://github.com/ilyamiro/nixos-configuration).
 
+This project turns that visual concept into a standalone Quickshell application for Arch Linux and Hyprland, with local image and video support, animated previews, color filtering, wallpaper restoration, desktop integrations, and online wallpaper discovery.
+
+Additional contributions by **bay0n** and other repository contributors are preserved in the Git history and contributors list.
 ## License
 
-See [LICENSE](LICENSE).
+Licensed under the MIT License. See [LICENSE](LICENSE).
