@@ -292,7 +292,7 @@ python -m compileall -q scripts tests
 while IFS= read -r script; do bash -n "$script"; done < <(git ls-files 'scripts/*.sh')
 ```
 
-GitHub Actions additionally verifies exact-head checkout, executable bits, deterministic ranking, preview/cache safety, QML downloader wiring, fresh-clone documentation, tracked links, launcher behavior, wallpaper/cache path consistency, mutually exclusive Escape shortcuts, safe public defaults, dependency and architecture accuracy, attribution, personal-path and credential scans, broad `pkill quickshell` regression checks and Git whitespace integrity.
+GitHub Actions additionally verifies exact-head checkout, executable bits, deterministic ranking, preview/cache safety, QML downloader wiring, fresh-clone documentation, tracked links, launcher behavior, wallpaper/cache path consistency, mutually exclusive Escape shortcuts, safe public defaults, dependency and architecture accuracy, attribution, personal-path and credential scans, picker-process termination regression checks and Git whitespace integrity.
 
 ## Credits
 
