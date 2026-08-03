@@ -256,7 +256,10 @@ Item {
             return;
         }
 
-        const originalFile = window.srcDir + "/" + String(safeFileName).replace(/^thumb_/, "")
+        const realFileName = isVideo
+            ? String(safeFileName).replace(/^000_/, "").replace(/\.(jpg|jpeg|png|webp)$/i, ".mp4")
+            : String(safeFileName).replace(/^thumb_/, "")
+        const originalFile = window.srcDir + "/" + realFileName
         const thumbFile = Quickshell.env("HOME") + "/.cache/wallpaper_picker/thumbs/" + safeFileName 
         
         let wallpaperCmd = ""
@@ -265,12 +268,20 @@ Item {
         const escOriginal = escapeBash(originalFile);
         const escThumb = escapeBash(thumbFile);
         const escReload = escapeBash(reloadScript);
+        const lastType = isVideo ? "video" : "image";
+        const escRealFileName = escapeBash(realFileName);
 
         if (isVideo) {
-            wallpaperCmd = `mpvpaper -o 'loop --no-audio --hwdec=auto --profile=high-quality --video-sync=display-resample --interpolation --tscale=oversample' '*' "$WALL_FILE"`
+            wallpaperCmd = `
+                pkill mpvpaper || true
+                awww clear || true
+                swww clear || true
+                mpvpaper -o 'loop --no-audio --hwdec=auto --profile=high-quality --video-sync=display-resample --interpolation --tscale=oversample --panscan=1.0 --video-unscaled=no' '*' "$WALL_FILE" >/tmp/mpvpaper.log 2>&1 &
+            `
             lockBgCmd = `cp "$THUMB_FILE" /tmp/lock_bg.png`
         } else {
             wallpaperCmd = `
+                pkill mpvpaper || true
                 TRANSITION="${window.pickTransition()}"
                 DURATION="${Number(settings.wallpaperTransitionDuration).toFixed(2)}"
                 FPS="${Math.max(1, Number(settings.wallpaperTransitionFps))}"
@@ -287,6 +298,16 @@ Item {
                 export THUMB_FILE="${escThumb}"
                 export RELOAD_SCRIPT="${escReload}"
 
+                echo "${lastType}|${escRealFileName}" > "$HOME/.cache/wallpaper_picker/last_wallpaper"
+
+                # Sync ML4W/Rofi wallpaper background async
+                (
+                    ML4W="$HOME/.cache/ml4w/hyprland-dotfiles"
+                    mkdir -p "$ML4W"
+                    echo "$WALL_FILE" > "$ML4W/current_wallpaper"
+                    magick "$WALL_FILE" -resize 2048x1280^ -gravity center -extent 2048x1280 -blur 0x18 "$ML4W/blurred_wallpaper.png" 2>/dev/null || true
+                    echo '* { current-image: url("'"$ML4W"'/blurred_wallpaper.png", height); }' > "$ML4W/current_wallpaper.rasi"
+                ) >/tmp/ml4w_rofi_wallpaper_sync.log 2>&1 &
                 echo "WALL_FILE=$WALL_FILE" > /tmp/qs_apply.log
                 ${lockBgCmd} || true
 
@@ -297,7 +318,8 @@ Item {
                     ${wallpaperCmd}
                 fi
 
-                ENABLE_DYNAMIC_COLORS="${boolEnv(settings.enableDynamicColors)}" ENABLE_MATUGEN="${boolEnv(settings.enableMatugen)}" ENABLE_HYPR_RELOAD="${boolEnv(settings.enableHyprReload)}" ENABLE_WAYBAR_RELOAD="${boolEnv(settings.enableWaybarReload)}" ENABLE_KITTY_RELOAD="${boolEnv(settings.enableKittyReload)}" ENABLE_CAVA_RELOAD="${boolEnv(settings.enableCavaReload)}" ENABLE_SWAYNC_RELOAD="${boolEnv(settings.enableSwayncReload)}" ENABLE_SWAYOSD_RELOAD="${boolEnv(settings.enableSwayosdReload)}" HYPR_COLORS_PATH="${escapeBash(settings.hyprColorsPath)}" WAYBAR_COLORS_PATH="${escapeBash(settings.waybarColorsPath)}" WAYBAR_LAUNCH_PATH="${escapeBash(settings.waybarLaunchPath)}" KITTY_SIGNAL_PROCESS="${escapeBash(settings.kittySignalProcess)}" EXTRA_RELOAD_COMMAND="${escapeBash(settings.extraReloadCommand)}" bash "$RELOAD_SCRIPT" "$WALL_FILE" || true
+                sleep 1
+                ENABLE_DYNAMIC_COLORS="${boolEnv(settings.enableDynamicColors)}" ENABLE_MATUGEN="${boolEnv(settings.enableMatugen)}" ENABLE_HYPR_RELOAD="${boolEnv(settings.enableHyprReload)}" ENABLE_WAYBAR_RELOAD="${boolEnv(settings.enableWaybarReload)}" ENABLE_KITTY_RELOAD="${boolEnv(settings.enableKittyReload)}" ENABLE_CAVA_RELOAD="${boolEnv(settings.enableCavaReload)}" ENABLE_SWAYNC_RELOAD="${boolEnv(settings.enableSwayncReload)}" ENABLE_SWAYOSD_RELOAD="${boolEnv(settings.enableSwayosdReload)}" HYPR_COLORS_PATH="${escapeBash(settings.hyprColorsPath)}" WAYBAR_COLORS_PATH="${escapeBash(settings.waybarColorsPath)}" WAYBAR_LAUNCH_PATH="${escapeBash(settings.waybarLaunchPath)}" KITTY_SIGNAL_PROCESS="${escapeBash(settings.kittySignalProcess)}" EXTRA_RELOAD_COMMAND="${escapeBash(settings.extraReloadCommand)}" bash "$RELOAD_SCRIPT" "$( [ "${isVideo}" = "true" ] && echo "$THUMB_FILE" || echo "$WALL_FILE" )" || true
             ) >> /tmp/qs_apply.log 2>&1 & disown
         `
         Quickshell.execDetached(["bash", "-c", fullScript])
@@ -596,19 +618,22 @@ Item {
     }
 
     function checkItemMatchesFilter(fileName, isVid, cv, filter) {
+        if (filter === "Search") return false;
+
+        if (filter === "Video") {
+            return isVid;
+        }
+
+        if (isVid) {
+            return false;
+        }
+
+        if (filter === "All") {
+            return true;
+        }
+
         const cleanName = window.getCleanName(fileName).toLowerCase();
-        const q = (window.searchQuery || "").trim().toLowerCase();
-
-        if (q !== "" && !cleanName.includes(q)) return false;
-
-        if (filter === "Search") return true;
-        if (filter === "All") return true;
-        if (filter === "Video") return isVid;
-
-        let hexColor = window.colorMap[String(fileName)];
-        if (!hexColor) return filter === "Monochrome";
-
-        return window.getHexBucket(hexColor) === filter;
+        return cleanName.includes(filter.toLowerCase());
     }
 
     FolderListModel {
@@ -1027,6 +1052,7 @@ Item {
             readonly property real targetHeight: isVisuallyEnlarged ? (window.itemHeight + window.s(30)) : window.itemHeight 
             
             property bool isPlayingVideo: false
+            property real pressScale: 1.0
 
             Timer {
                 id: videoPlayTimer
@@ -1060,6 +1086,12 @@ Item {
 
             z: isVisuallyEnlarged ? 10 : 1
             
+            Timer {
+                id: clickPulseReset
+                interval: 120
+                onTriggered: delegateRoot.pressScale = 1.0
+            }
+
             Behavior on scale { enabled: window.initialFocusSet; NumberAnimation { duration: window.anim(500); easing.type: Easing.InOutQuad } }
             Behavior on width { enabled: window.initialFocusSet; NumberAnimation { duration: window.anim(500); easing.type: Easing.InOutQuad } }
             Behavior on height { enabled: window.initialFocusSet; NumberAnimation { duration: window.anim(500); easing.type: Easing.InOutQuad } } 
@@ -1071,6 +1103,14 @@ Item {
                 
                 width: parent.width > 0 ? parent.width * (targetWidth / (targetWidth + window.spacing)) : 0
                 height: parent.height
+                scale: delegateRoot.pressScale
+
+                Behavior on scale {
+                    NumberAnimation {
+                        duration: window.anim(180)
+                        easing.type: Easing.OutBack
+                    }
+                }
 
                 transform: Matrix4x4 {
                     property real s: window.skewFactor
@@ -1082,6 +1122,8 @@ Item {
                     // Lock inputs completely on the delegate as well
                     enabled: delegateRoot.matchesFilter && !window.isScrollingBlocked && !window.isApplying
                     onClicked: {
+                        delegateRoot.pressScale = 0.94
+                        clickPulseReset.start()
                         view.currentIndex = index
                         window.applyWallpaper(delegateRoot.safeFileName, delegateRoot.isVideo)
                     }
