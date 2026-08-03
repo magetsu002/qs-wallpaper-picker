@@ -1,0 +1,178 @@
+{
+  "relevance": {
+    "data": [
+      {
+        "id": "exct01",
+        "path": "https://w.wallhaven.cc/full/ex/wallhaven-exct01.jpg",
+        "dimension_x": 3840,
+        "dimension_y": 2160,
+        "file_size": 3000000,
+        "favorites": 300,
+        "views": 30000,
+        "thumbs": {
+          "large": "https://th.wallhaven.cc/lg/ex/exct01.jpg"
+        }
+      },
+      {
+        "id": "near01",
+        "path": "https://w.wallhaven.cc/full/ne/wallhaven-near01.jpg",
+        "dimension_x": 2560,
+        "dimension_y": 1600,
+        "file_size": 2500000,
+        "favorites": 300,
+        "views": 30000,
+        "thumbs": {
+          "large": "https://th.wallhaven.cc/lg/ne/near01.jpg"
+        }
+      },
+      {
+        "id": "bad001",
+        "path": "https://w.wallhaven.cc/full/ba/wallhaven-bad001.jpg",
+        "dimension_x": 2400,
+        "dimension_y": 1800,
+        "file_size": 2000000,
+        "favorites": 100,
+        "views": 10000,
+        "thumbs": {
+          "large": "https://th.wallhaven.cc/lg/ba/bad001.jpg"
+        }
+      },
+      {
+        "id": "low001",
+        "path": "https://w.wallhaven.cc/full/lo/wallhaven-low001.jpg",
+        "dimension_x": 1280,
+        "dimension_y": 720,
+        "file_size": 500000,
+        "favorites": 100,
+        "views": 10000,
+        "thumbs": {
+          "large": "https://th.wallhaven.cc/lg/lo/low001.jpg"
+        }
+      },
+      {
+        "id": "port01",
+        "path": "https://w.wallhaven.cc/full/po/wallhaven-port01.jpg",
+        "dimension_x": 1800,
+        "dimension_y": 2400,
+        "file_size": 2000000,
+        "favorites": 100,
+        "views": 10000,
+        "thumbs": {
+          "large": "https://th.wallhaven.cc/lg/po/port01.jpg"
+        }
+      },
+      {
+        "id": "dupe01",
+        "path": "https://w.wallhaven.cc/full/du/wallhaven-dupe01.jpg",
+        "dimension_x": 3200,
+        "dimension_y": 1800,
+        "file_size": 2000000,
+        "favorites": 200,
+        "views": 20000,
+        "thumbs": {
+          "large": "https://th.wallhaven.cc/lg/du/dupe01.jpg"
+        }
+      },
+      {
+        "id": "miss01",
+        "path": "https://w.wallhaven.cc/full/mi/wallhaven-miss01.jpg",
+        "dimension_x": 2560,
+        "dimension_y": 1440,
+        "file_size": 1800000,
+        "thumbs": {
+          "large": "https://th.wallhaven.cc/lg/mi/miss01.jpg"
+        }
+      },
+      {
+        "id": "",
+        "path": "https://w.wallhaven.cc/full/xx/wallhaven-xx.jpg",
+        "dimension_x": 2560,
+        "dimension_y": 1440,
+        "file_size": 1800000,
+        "thumbs": {
+          "large": "https://th.wallhaven.cc/lg/xx/xx.jpg"
+        }
+      }
+    ]
+  },
+  "toplist": {
+    "data": [
+      {
+        "id": "dupe01",
+        "path": "https://w.wallhaven.cc/full/du/wallhaven-dupe01.jpg",
+        "dimension_x": 3200,
+        "dimension_y": 1800,
+        "file_size": 2000000,
+        "favorites": 200,
+        "views": 20000,
+        "thumbs": {
+          "large": "https://th.wallhaven.cc/lg/du/dupe01.jpg"
+        }
+      },
+      {
+        "id": "top001",
+        "path": "https://w.wallhaven.cc/full/to/wallhaven-top001.jpg",
+        "dimension_x": 3840,
+        "dimension_y": 2160,
+        "file_size": 3200000,
+        "favorites": 800,
+        "views": 100000,
+        "thumbs": {
+          "large": "https://th.wallhaven.cc/lg/to/top001.jpg"
+        }
+      },
+      {
+        "id": "same02",
+        "path": "https://w.wallhaven.cc/full/to/wallhaven-top001.jpg",
+        "dimension_x": 3840,
+        "dimension_y": 2160,
+        "file_size": 3000000,
+        "favorites": 500,
+        "views": 50000,
+        "thumbs": {
+          "large": "https://th.wallhaven.cc/lg/sa/same02.jpg"
+        }
+      }
+    ]
+  },
+  "favorites": {
+    "data": [
+      {
+        "id": "dupe01",
+        "path": "https://w.wallhaven.cc/full/du/wallhaven-dupe01.jpg",
+        "dimension_x": 3200,
+        "dimension_y": 1800,
+        "file_size": 2000000,
+        "favorites": 200,
+        "views": 20000,
+        "thumbs": {
+          "large": "https://th.wallhaven.cc/lg/du/dupe01.jpg"
+        }
+      },
+      {
+        "id": "fav001",
+        "path": "https://w.wallhaven.cc/full/fa/wallhaven-fav001.jpg",
+        "dimension_x": 3840,
+        "dimension_y": 2160,
+        "file_size": 3100000,
+        "favorites": 2000,
+        "views": 200000,
+        "thumbs": {
+          "large": "https://th.wallhaven.cc/lg/fa/fav001.jpg"
+        }
+      },
+      {
+        "id": "tiny01",
+        "path": "https://w.wallhaven.cc/full/ti/wallhaven-tiny01.jpg",
+        "dimension_x": 3840,
+        "dimension_y": 2160,
+        "file_size": 100,
+        "favorites": 10,
+        "views": 1000,
+        "thumbs": {
+          "large": "https://th.wallhaven.cc/lg/ti/tiny01.jpg"
+        }
+      }
+    ]
+  }
+}

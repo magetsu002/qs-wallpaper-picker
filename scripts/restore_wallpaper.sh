@@ -1,8 +1,15 @@
 #!/usr/bin/env bash
 
-set -u
+set -euo pipefail
 
-LAST="$HOME/.cache/wallpaper_picker/last_wallpaper"
+SCRIPT_DIR="$(
+    cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &&
+    pwd
+)"
+# shellcheck source=cache_paths.sh
+source "$SCRIPT_DIR/cache_paths.sh"
+
+LAST="$(wallpaper_cache_dir)/last_wallpaper"
 DEFAULT_SOURCE="${QS_WALLPAPER_DIR:-$HOME/Wallpapers}"
 
 [[ -f "$LAST" ]] || exit 0
@@ -40,19 +47,15 @@ else
         >/dev/null 2>&1 || true
 fi
 
-ml4w_mode="${QS_WALLPAPER_ENABLE_ML4W:-auto}"
+ml4w_mode="${QS_WALLPAPER_ENABLE_ML4W:-0}"
 ml4w_dir="$HOME/.cache/ml4w/hyprland-dotfiles"
 ml4w_source="$wallpaper"
 
-if [[ "$wallpaper_type" == "video" &&
-      -f /tmp/lock_bg.png ]]
-then
+if [[ "$wallpaper_type" == "video" && -f /tmp/lock_bg.png ]]; then
     ml4w_source="/tmp/lock_bg.png"
 fi
 
-if [[ "$ml4w_mode" == "1" ]] ||
-   [[ "$ml4w_mode" == "auto" && -d "$ml4w_dir" ]]
-then
+if [[ "$ml4w_mode" == "1" ]]; then
     mkdir -p "$ml4w_dir"
 
     printf '%s\n' "$wallpaper" \

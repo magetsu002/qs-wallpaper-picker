@@ -100,6 +100,8 @@ Item {
     // Download and Status Tracking Properties
     property bool isDownloadingWallpaper: false
     property string currentDownloadName: ""
+    property string pendingOnlineDownloadName: ""
+    property string pendingOnlineDownloadDestination: ""
     
     // STRICT ARCHITECTURAL LOCK
     property bool isApplying: false 
@@ -132,17 +134,135 @@ Item {
         { name: "Search", hex: "", label: "Search" } 
     ]
 
+    function resolveProjectScript(relativePath) {
+        let scriptPath = Qt.resolvedUrl(relativePath).toString()
+        if (scriptPath.startsWith("file://")) {
+            scriptPath = decodeURIComponent(scriptPath.substring(7))
+        }
+        return scriptPath
+    }
+
+    function startOnlineDownload(safeFileName, destination) {
+        if (!safeFileName || !destination ||
+            window.isDownloadingWallpaper || onlineDownloadProcess.running) {
+            return
+        }
+
+        window.isDownloadingWallpaper = true
+        window.isApplying = true
+        window.currentDownloadName = safeFileName
+        window.pendingOnlineDownloadName = safeFileName
+        window.pendingOnlineDownloadDestination = destination
+        window.onlineSearchError = ""
+
+        onlineDownloadProcess.command = [
+            "bash",
+            window.resolveProjectScript("scripts/online_search.sh"),
+            "--download",
+            safeFileName,
+            "--destination",
+            destination
+        ]
+        onlineDownloadProcess.running = true
+    }
+
+    function applyDownloadedOnlineWallpaper(safeFileName) {
+        if (!safeFileName) {
+            window.isApplying = false
+            return
+        }
+
+        window.isApplying = true
+        window.targetWallName = safeFileName
+
+        const escapeBash = (str) => String(str).replace(/(["\\$`])/g, '\\$1')
+        const boolEnv = (value) => value ? "1" : "0"
+        const destFile = window.srcDir + "/" + safeFileName
+        const finalThumb = decodeURIComponent(window.thumbDir.replace("file://", "")) + "/" + safeFileName
+        const tempThumb = decodeURIComponent(window.searchDir.replace("file://", "")) + "/" + safeFileName
+        const reloadScript = window.resolveProjectScript("scripts/matugen_reload.sh")
+        const randomTransition = window.transitions[Math.floor(Math.random() * window.transitions.length)]
+
+        const applyScript = `
+            (
+                export DEST_FILE="${escapeBash(destFile)}"
+                export FINAL_THUMB="${escapeBash(finalThumb)}"
+                export TEMP_THUMB="${escapeBash(tempThumb)}"
+                export RELOAD_SCRIPT="${escapeBash(reloadScript)}"
+                export RANDOM_TRANSITION="${escapeBash(window.normalizeTransition(randomTransition))}"
+                export TRANSITION_DURATION="${Number(settings.wallpaperTransitionDuration).toFixed(2)}"
+                export TRANSITION_FPS="${Math.max(1, Number(settings.wallpaperTransitionFps))}"
+
+                if [ -f "$TEMP_THUMB" ]; then
+                    cp "$TEMP_THUMB" "$FINAL_THUMB" 2>/dev/null || true
+                fi
+                if command -v magick >/dev/null 2>&1; then
+                    magick "$DEST_FILE" -resize x420 -quality 70 "$FINAL_THUMB" 2>/dev/null || true
+                fi
+
+                cp "$DEST_FILE" /tmp/lock_bg.png || true
+                pkill mpvpaper || true
+
+                (
+                    ENABLE_DYNAMIC_COLORS="${boolEnv(settings.enableDynamicColors)}" \
+                    ENABLE_MATUGEN="${boolEnv(settings.enableMatugen)}" \
+                    ENABLE_HYPR_RELOAD="${boolEnv(settings.enableHyprReload)}" \
+                    ENABLE_WAYBAR_RELOAD="${boolEnv(settings.enableWaybarReload)}" \
+                    ENABLE_KITTY_RELOAD="${boolEnv(settings.enableKittyReload)}" \
+                    ENABLE_CAVA_RELOAD="${boolEnv(settings.enableCavaReload)}" \
+                    ENABLE_SWAYNC_RELOAD="${boolEnv(settings.enableSwayncReload)}" \
+                    ENABLE_SWAYOSD_RELOAD="${boolEnv(settings.enableSwayosdReload)}" \
+                    HYPR_COLORS_PATH="${escapeBash(settings.hyprColorsPath)}" \
+                    WAYBAR_COLORS_PATH="${escapeBash(settings.waybarColorsPath)}" \
+                    WAYBAR_LAUNCH_PATH="${escapeBash(settings.waybarLaunchPath)}" \
+                    KITTY_SIGNAL_PROCESS="${escapeBash(settings.kittySignalProcess)}" \
+                    EXTRA_RELOAD_COMMAND="${escapeBash(settings.extraReloadCommand)}" \
+                    bash "$RELOAD_SCRIPT" "$DEST_FILE" || true
+                ) &
+                MATUGEN_PID=$!
+
+                for i in {1..20}; do
+                    if awww img --transition-type "$RANDOM_TRANSITION" --transition-duration "$TRANSITION_DURATION" --transition-fps "$TRANSITION_FPS" "$DEST_FILE" >/dev/null 2>&1; then
+                        break
+                    fi
+                    if awww img --transition-type fade --transition-duration "$TRANSITION_DURATION" --transition-fps "$TRANSITION_FPS" "$DEST_FILE" >/dev/null 2>&1; then
+                        break
+                    fi
+                    sleep 0.05
+                done
+
+                wait $MATUGEN_PID
+            ) > /tmp/qs_apply.log 2>&1 & disown
+        `
+
+        Quickshell.execDetached(["bash", "-c", applyScript])
+        window.requestClose()
+    }
+
     // -------------------------------------------------------------------------
     // GLOBAL ACTION: APPLY WALLPAPER
     // -------------------------------------------------------------------------
     function applyWallpaper(safeFileName, isVideo) {
-        if (!safeFileName || window.isApplying) return;
-        
-        // 1. STRICT LOCK: Instantly block all further mouse and keyboard input
-        window.isApplying = true; 
-        
+        if (!safeFileName || window.isApplying ||
+            window.isDownloadingWallpaper || onlineDownloadProcess.running) {
+            return
+        }
+
         window.targetWallName = safeFileName
-        let cleanName = window.getCleanName(safeFileName)
+
+        if (window.currentFilter === "Search" && window.hasSearched) {
+            const destFile = window.srcDir + "/" + safeFileName
+
+            if (window.isDownloaded(safeFileName)) {
+                window.applyDownloadedOnlineWallpaper(safeFileName)
+            } else {
+                window.startOnlineDownload(safeFileName, destFile)
+            }
+            return
+        }
+
+        window.isApplying = true
+
         let reloadScript = Qt.resolvedUrl("scripts/matugen_reload.sh").toString()
         
         if (reloadScript.startsWith("file://")) {
@@ -150,113 +270,7 @@ Item {
         }
 
         const boolEnv = (v) => v ? "1" : "0";
-
         const escapeBash = (str) => String(str).replace(/(["\\$`])/g, '\\$1');
-        
-        if (window.currentFilter === "Search" && window.hasSearched) {
-            let alreadyExists = window.isDownloaded(safeFileName);
-            let destFile = window.srcDir + "/" + safeFileName;
-            let finalThumb = decodeURIComponent(window.thumbDir.replace("file://", "")) + "/" + safeFileName;
-            let tempThumb = decodeURIComponent(window.searchDir.replace("file://", "")) + "/" + safeFileName;
-            let mapFile = Quickshell.env("HOME") + "/.cache/wallpaper_picker/search_map.txt";
-            const randomTransition = window.transitions[Math.floor(Math.random() * window.transitions.length)];
-
-            if (alreadyExists) {
-                const applyScript = `
-                    (
-                        # Command UI to close immediately
-                        # echo 'close' > /tmp/qs_widget_state
-                        
-                        export DEST_FILE="${escapeBash(destFile)}"
-                        export FINAL_THUMB="${escapeBash(finalThumb)}"
-                        export RELOAD_SCRIPT="${escapeBash(reloadScript)}"
-                        export RANDOM_TRANSITION="${escapeBash(window.normalizeTransition(randomTransition))}"
-                        export TRANSITION_DURATION="${Number(settings.wallpaperTransitionDuration).toFixed(2)}"
-                        export TRANSITION_FPS="${Math.max(1, Number(settings.wallpaperTransitionFps))}"
-                                    
-                        cp "$DEST_FILE" /tmp/lock_bg.png || true
-                        pkill mpvpaper || true
-                        
-                        # Run matugen completely detached so it doesn't block wallpaper execution
-                        (
-                            ENABLE_DYNAMIC_COLORS="${boolEnv(settings.enableDynamicColors)}"                             ENABLE_MATUGEN="${boolEnv(settings.enableMatugen)}"                             ENABLE_HYPR_RELOAD="${boolEnv(settings.enableHyprReload)}"                             ENABLE_WAYBAR_RELOAD="${boolEnv(settings.enableWaybarReload)}"                             ENABLE_KITTY_RELOAD="${boolEnv(settings.enableKittyReload)}"                             ENABLE_CAVA_RELOAD="${boolEnv(settings.enableCavaReload)}"                             ENABLE_SWAYNC_RELOAD="${boolEnv(settings.enableSwayncReload)}"                             ENABLE_SWAYOSD_RELOAD="${boolEnv(settings.enableSwayosdReload)}"                             HYPR_COLORS_PATH="${escapeBash(settings.hyprColorsPath)}"                             WAYBAR_COLORS_PATH="${escapeBash(settings.waybarColorsPath)}"                             WAYBAR_LAUNCH_PATH="${escapeBash(settings.waybarLaunchPath)}"                             KITTY_SIGNAL_PROCESS="${escapeBash(settings.kittySignalProcess)}"                             EXTRA_RELOAD_COMMAND="${escapeBash(settings.extraReloadCommand)}"                             bash "$RELOAD_SCRIPT" "$DEST_FILE" || true
-                        ) &
-                        MATUGEN_PID=$!
-                        
-                        # DETERMINISTIC LOOP: Force wallpaper apply to succeed.
-                        # It will poll every 50ms up to 20 times until the compositor accepts the frame.
-                        for i in {1..20}; do
-                            if awww img --transition-type "$RANDOM_TRANSITION" --transition-duration "$TRANSITION_DURATION" --transition-fps "$TRANSITION_FPS" "$DEST_FILE" >/dev/null 2>&1; then
-                                break
-                            fi
-                            if awww img --transition-type fade --transition-duration "$TRANSITION_DURATION" --transition-fps "$TRANSITION_FPS" "$DEST_FILE" >/dev/null 2>&1; then
-                                break
-                            fi
-                            sleep 0.05
-                        done
-                        
-                        wait $MATUGEN_PID
-                    ) > /tmp/qs_apply.log 2>&1 & disown
-                `;
-                Quickshell.execDetached(["bash", "-c", applyScript]);
-                window.requestClose();
-            } else {
-                window.isDownloadingWallpaper = true;
-                window.currentDownloadName = safeFileName;
-
-                const downloadScript = `
-                    export SAFE_NAME="${escapeBash(safeFileName)}"
-                    export DEST_FILE="${escapeBash(destFile)}"
-                    export FINAL_THUMB="${escapeBash(finalThumb)}"
-                    export TEMP_THUMB="${escapeBash(tempThumb)}"
-                    export RELOAD_SCRIPT="${escapeBash(reloadScript)}"
-                    export MAP_FILE="${escapeBash(mapFile)}"
-                    
-                    (
-                        URL=$(awk -F'|' -v fname="$SAFE_NAME" '$1 == fname {print $2; exit}' "$MAP_FILE")
-                        if [ -n "$URL" ]; then
-                            curl -s -L -A "Mozilla/5.0" "$URL" -o "$DEST_FILE.tmp"
-                            
-                            if file "$DEST_FILE.tmp" | grep -iq "webp"; then
-                                magick "$DEST_FILE.tmp" "$DEST_FILE"
-                                rm -f "$DEST_FILE.tmp"
-                            else
-                                mv "$DEST_FILE.tmp" "$DEST_FILE"
-                            fi
-                            
-                            cp "$TEMP_THUMB" "$FINAL_THUMB"
-                            magick "$DEST_FILE" -resize x420 -quality 70 "$FINAL_THUMB" || true
-                            
-                            # echo 'close' > /tmp/qs_widget_state
-                            
-                            cp "$DEST_FILE" /tmp/lock_bg.png || true
-                            pkill mpvpaper || true
-                            
-                            (
-                            ENABLE_DYNAMIC_COLORS="${boolEnv(settings.enableDynamicColors)}"                             ENABLE_MATUGEN="${boolEnv(settings.enableMatugen)}"                             ENABLE_HYPR_RELOAD="${boolEnv(settings.enableHyprReload)}"                             ENABLE_WAYBAR_RELOAD="${boolEnv(settings.enableWaybarReload)}"                             ENABLE_KITTY_RELOAD="${boolEnv(settings.enableKittyReload)}"                             ENABLE_CAVA_RELOAD="${boolEnv(settings.enableCavaReload)}"                             ENABLE_SWAYNC_RELOAD="${boolEnv(settings.enableSwayncReload)}"                             ENABLE_SWAYOSD_RELOAD="${boolEnv(settings.enableSwayosdReload)}"                             HYPR_COLORS_PATH="${escapeBash(settings.hyprColorsPath)}"                             WAYBAR_COLORS_PATH="${escapeBash(settings.waybarColorsPath)}"                             WAYBAR_LAUNCH_PATH="${escapeBash(settings.waybarLaunchPath)}"                             KITTY_SIGNAL_PROCESS="${escapeBash(settings.kittySignalProcess)}"                             EXTRA_RELOAD_COMMAND="${escapeBash(settings.extraReloadCommand)}"                             bash "$RELOAD_SCRIPT" "$DEST_FILE" || true
-                        ) &
-                            MATUGEN_PID=$!
-                            
-                            # DETERMINISTIC LOOP
-                            for i in {1..20}; do
-                                if awww img --transition-type "$RANDOM_TRANSITION" --transition-duration "$TRANSITION_DURATION" --transition-fps "$TRANSITION_FPS" "$DEST_FILE" >/dev/null 2>&1; then
-                                    break
-                                fi
-                                if awww img --transition-type fade --transition-duration "$TRANSITION_DURATION" --transition-fps "$TRANSITION_FPS" "$DEST_FILE" >/dev/null 2>&1; then
-                                    break
-                                fi
-                                sleep 0.05
-                            done
-                            
-                            wait $MATUGEN_PID
-                        fi
-                    ) > /tmp/qs_apply.log 2>&1 & disown
-                `;
-                Quickshell.execDetached(["bash", "-c", downloadScript]);
-                window.requestClose();
-            }
-            return;
-        }
 
         const realFileName =
             window.getSourceFileName(
@@ -745,14 +759,31 @@ Item {
         folder: "file://" + window.srcDir
         nameFilters: ["*.jpg", "*.jpeg", "*.png", "*.webp", "*.gif", "*.mp4", "*.mkv", "*.mov", "*.webm"]
         showDirs: false
-        
-        onCountChanged: {
-            if (window.isDownloadingWallpaper && window.isDownloaded(window.currentDownloadName)) {
-                window.isDownloadingWallpaper = false;
-            }
-        }
     }
 
+    Process {
+        id: onlineDownloadProcess
+
+        onExited: (exitCode, exitStatus) => {
+            const completedName = window.pendingOnlineDownloadName
+
+            window.isDownloadingWallpaper = false
+            window.currentDownloadName = ""
+            window.pendingOnlineDownloadName = ""
+            window.pendingOnlineDownloadDestination = ""
+
+            if (exitCode === 0 && completedName !== "") {
+                window.onlineSearchError = ""
+                window.reloadFolder()
+                window.applyDownloadedOnlineWallpaper(completedName)
+                return
+            }
+
+            window.isApplying = false
+            window.onlineSearchError = "Download failed"
+            view.forceActiveFocus()
+        }
+    }
 
     Process {
         id: onlineSearchProcess
