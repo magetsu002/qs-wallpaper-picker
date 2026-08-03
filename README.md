@@ -4,8 +4,13 @@ A fast, keyboard-first wallpaper picker for Hyprland, built with Quickshell.
 
 Browse local images and videos, filter by color, enjoy animated previews, and discover display-aware Wallhaven wallpapers without leaving the picker.
 
-
-<img width="2560" height="1600" alt="preview" src="https://github.com/user-attachments/assets/d14fce0d-4ef9-4cca-8c41-94e4ffd893bd" />
+<p align="center">
+  <img
+    width="2560"
+    height="1600"
+    alt="QS Wallpaper Picker interface"
+    src="https://github.com/user-attachments/assets/d14fce0d-4ef9-4cca-8c41-94e4ffd893bd"
+  />
 </p>
 
 ## Highlights
@@ -250,6 +255,7 @@ The carousel-style wallpaper picker interface was adapted from the wallpaper pic
 This project turns that visual concept into a standalone Quickshell application for Arch Linux and Hyprland, with local image and video support, animated previews, color filtering, wallpaper restoration, desktop integrations, and online wallpaper discovery.
 
 Additional contributions by **bay0n** and other repository contributors are preserved in the Git history and contributors list.
+
 ## License
 
 Licensed under the MIT License. See [LICENSE](LICENSE).
