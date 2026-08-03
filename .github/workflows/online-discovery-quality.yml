@@ -1,0 +1,161 @@
+name: Online Discovery Quality
+
+on:
+  push:
+    branches:
+      - feat/high-quality-online-wallpaper-engine-v1
+  pull_request:
+    branches:
+      - integration/bayon-online-search-20260803T144613
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: online-discovery-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REQUIRED_BASE_SHA: bf589735b18da4b7aed2bd903969e392cb3de06d
+
+jobs:
+  quality:
+    name: Network-independent quality gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run production behavior tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Compile Python sources and tests
+        run: python -m compileall -q scripts tests
+
+      - name: Check every tracked shell script
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r script; do
+            bash -n "$script"
+          done < <(git ls-files 'scripts/*.sh')
+
+      - name: Check executable shell entry points
+        shell: bash
+        run: |
+          set -euo pipefail
+          failed=0
+          while read -r mode _stage _sha path; do
+            if [[ "$mode" != "100755" ]]; then
+              echo "Shell entry point is not executable: $path ($mode)" >&2
+              failed=1
+            fi
+          done < <(git ls-files -s 'scripts/*.sh')
+          exit "$failed"
+
+      - name: Verify production wiring
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -Fq 'preview_pipeline.py' scripts/online_search.sh
+          grep -Fq 'Type to search locally • Press Enter to search online' Main.qml
+          grep -Fq 'triggerOnlineSearch(normalized)' Main.qml
+          grep -Fq -- '--download' scripts/preview_pipeline.py
+          grep -Fq 'download_full_wallpaper' scripts/preview_pipeline.py
+
+      - name: Verify preserved desktop behavior remains represented
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -Fq 'getSourceFileName' WallpaperPicker.qml
+          grep -Fq 'mpvpaper' WallpaperPicker.qml
+          grep -Fq 'MatugenColors' WallpaperPicker.qml
+          grep -Fq 'ENABLE_MATUGEN' WallpaperPicker.qml
+          grep -Fq 'QS_WALLPAPER_ENABLE_ML4W' WallpaperPicker.qml
+          grep -Fq 'triggerColorExtraction' WallpaperPicker.qml
+          grep -Fq 'restore_wallpaper.sh' README.md || true
+
+      - name: Check diff integrity and prohibited additions
+        shell: bash
+        run: |
+          set -euo pipefail
+          git cat-file -e "${REQUIRED_BASE_SHA}^{commit}"
+          git diff --check "${REQUIRED_BASE_SHA}...HEAD"
+
+          added_lines="$(
+            git diff --unified=0 "${REQUIRED_BASE_SHA}...HEAD" -- \
+              | grep '^+' \
+              | grep -v '^+++' \
+              || true
+          )"
+
+          if grep -Eq '/home/[A-Za-z0-9._-]+' <<<"$added_lines"; then
+            echo 'Personal home-directory path added.' >&2
+            exit 1
+          fi
+
+          if grep -Eiq 'pkill[[:space:]]+(-[^[:space:]]+[[:space:]]+)*quickshell' <<<"$added_lines"; then
+            echo 'Broad pkill quickshell behavior added.' >&2
+            exit 1
+          fi
+
+          if grep -Eq '(sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY)' <<<"$added_lines"; then
+            echo 'Possible committed credential detected.' >&2
+            exit 1
+          fi
+
+      - name: Check documentation and configuration consistency
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          readme = Path('README.md').read_text(encoding='utf-8')
+          required_variables = {
+              'QS_WALLPAPER_TARGET_WIDTH',
+              'QS_WALLPAPER_TARGET_HEIGHT',
+              'QS_WALLPAPER_RESULT_LIMIT',
+              'QS_WALLPAPER_CANDIDATE_LIMIT',
+              'QS_WALLPAPER_SEARCH_JOBS',
+              'QS_WALLPAPER_MIN_WIDTH',
+              'QS_WALLPAPER_MIN_HEIGHT',
+              'QS_WALLPAPER_MAX_RATIO_ERROR',
+              'QS_WALLPAPER_CONNECT_TIMEOUT',
+              'QS_WALLPAPER_TOTAL_TIMEOUT',
+              'QS_WALLPAPER_RETRIES',
+          }
+          missing = sorted(name for name in required_variables if name not in readme)
+          if missing:
+              raise SystemExit(f'Missing configuration documentation: {missing}')
+
+          required_docs = (
+              'Press Enter to search online',
+              'Full-resolution files download only after',
+              'atomic publication pointer',
+              'bay0n',
+              'does not claim to understand subjective artistic quality',
+          )
+          absent = [text for text in required_docs if text not in readme]
+          if absent:
+              raise SystemExit(f'Missing required documentation: {absent}')
+          PY
+
+      - name: Confirm deterministic test coverage executes production code
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -Fq 'rank_payloads' tests/test_wallpaper_search.py
+          grep -Fq 'import wallpaper_search as core' tests/test_preview_pipeline.py
+          grep -Fq 'download_ranked_previews' tests/test_preview_pipeline.py
+          grep -Fq 'test_deterministic_order_is_independent_of_payload_list_order' tests/test_wallpaper_search.py
