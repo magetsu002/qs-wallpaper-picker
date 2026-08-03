@@ -1,43 +1,54 @@
 # QS Wallpaper Picker
 
-A fast keyboard-first Quickshell wallpaper picker with local image and video support, color filters, animated previews and high-quality Wallhaven discovery.
+A fast keyboard-first Quickshell wallpaper picker with local image and video support, color filters, animated previews and quality-ranked Wallhaven search.
 
 <!-- Add the final picker screenshot here after capture. Suggested path: docs/assets/wallpaper-picker-preview.png -->
 
-## Features
+## Primary features
 
 - Keyboard-first wallpaper browsing
-- Local image and video wallpapers
+- Local image wallpapers
+- Local video wallpapers
 - Animated image and video previews
 - Color-based filtering
 - Explicit local and online search
-- Display-aware, quality-ranked Wallhaven results
-- Preview-first browsing with safe full-resolution downloads
+- Display-aware ranked Wallhaven results
+- Preview-first safe full-resolution downloads
 
-## Installation
-
-Clone the repository and enter it:
+## Quick installation
 
 ```bash
 git clone https://github.com/magetsu002/qs-wallpaper-picker.git
 cd qs-wallpaper-picker
-```
-
-The default wallpaper directory is `$HOME/Wallpapers`. Create it when needed:
-
-```bash
+cp config/Settings.qml.example config/Settings.qml
 mkdir -p "$HOME/Wallpapers"
+./scripts/open_picker.sh
 ```
 
-Settings such as the wallpaper directory, transitions and desktop integrations are available in [`config/Settings.qml`](config/Settings.qml).
+The tracked template is [`config/Settings.qml.example`](config/Settings.qml.example). Edit your copied, ignored `config/Settings.qml` for local preferences.
 
 ## Launching
 
-Generate or refresh local previews, then launch the picker from the repository directory:
+Use the launcher for normal operation:
 
 ```bash
-bash scripts/sync_thumbs.sh "$HOME/Wallpapers"
+./scripts/open_picker.sh
+```
+
+It resolves the project path, synchronizes thumbnails, initializes the XDG-aware cache contract, prevents duplicate picker instances and launches `Main.qml`.
+
+Direct launch is an advanced alternative after setup:
+
+```bash
 quickshell -p Main.qml
+```
+
+## Hyprland keybind
+
+Use the absolute repository path so the launcher can resolve every supporting file:
+
+```ini
+bind = SUPER, W, exec, /absolute/path/to/qs-wallpaper-picker/scripts/open_picker.sh
 ```
 
 ## Controls
@@ -45,38 +56,43 @@ quickshell -p Main.qml
 - **Left / Right** — move between wallpapers
 - **Enter** — apply the selected wallpaper
 - **Tab / Shift+Tab** — move between filters
-- **Search field** — filter local wallpaper filenames while typing
-- **Enter in Search** — search Wallhaven explicitly
-- **Escape** — leave the Search view
-- **Mouse click** — select and apply a wallpaper
+- **Typing in Search** — filter local filenames
+- **Enter in Search** — search Wallhaven
+- **Escape in Search** — return to All
+- **Escape elsewhere** — close the picker
+- **Mouse click** — select and apply
 
-## Local and online search
+## Local versus online search
 
-Typing filters local wallpaper filenames.
+Typing searches local wallpaper filenames.
 
-Pressing Enter searches Wallhaven, even when local matches exist.
+Pressing Enter searches Wallhaven even when local matches exist.
 
-The picker labels local results, online searching, online results, empty results and download failures separately. Online results are filtered and ranked for the active display instead of being shown in API order.
-
-Preview images download during search. Full-resolution files download only after the user selects an online result. Selection uses the validated production downloader and does not trust arbitrary URLs inside QML.
+Online search downloads validated previews first. The full-resolution image is downloaded only after selection, through the validated production downloader. A failed download does not apply a partial file or close the picker as though it succeeded.
 
 ## Requirements
 
-### Required
+### Required for normal image usage
 
-- Linux with Hyprland
+- Linux
+- Hyprland
 - [Quickshell](https://quickshell.org/)
-- Python 3.11 or newer
 - Bash
-- `awww` for image wallpapers and transitions
-- `mpvpaper` when using video wallpapers
+- Python 3.12, the version certified by CI
+- `awww` for image wallpaper application and transitions
+- ImageMagick (`magick`) for local image thumbnails and color extraction
 
-### Optional
+### Required for video support
 
-- ImageMagick for enhanced thumbnails and color extraction
+- `ffmpeg` for video thumbnail generation
+- `mpvpaper` for video wallpaper playback
+
+### Optional integrations
+
 - Matugen for dynamic colors
-- ML4W integration
-- `hyprctl`, `wlr-randr` or `xrandr` for display detection; otherwise a safe fallback is used
+- ML4W synchronization
+- Waybar, Kitty, Cava, SwayNC and SwayOSD reload targets
+- `hyprctl`, `wlr-randr` or `xrandr` for display detection; a safe fallback exists
 
 ### Development and testing
 
@@ -84,41 +100,81 @@ Preview images download during search. Full-resolution files download only after
 - Bash
 - Git
 
-No Wallhaven account, API key, cloud AI service, GPU model or third-party Python package is required.
+Wallhaven search requires no account, API key, cloud AI service, GPU model or third-party Python package.
 
-## Configuration
+## Basic configuration
 
-Most users only need [`config/Settings.qml`](config/Settings.qml). Useful environment overrides include:
+Create the local settings file once:
 
 ```bash
-QS_WALLPAPER_DIR="$HOME/Wallpapers"
-QS_WALLPAPER_TARGET_WIDTH=2560
-QS_WALLPAPER_TARGET_HEIGHT=1440
-QS_WALLPAPER_RESULT_LIMIT=12
-QS_WALLPAPER_SEARCH_JOBS=6
+cp config/Settings.qml.example config/Settings.qml
 ```
 
-The complete validated online-search reference covers `QS_WALLPAPER_TARGET_WIDTH`, `QS_WALLPAPER_TARGET_HEIGHT`, `QS_WALLPAPER_RESULT_LIMIT`, `QS_WALLPAPER_CANDIDATE_LIMIT`, `QS_WALLPAPER_SEARCH_JOBS`, `QS_WALLPAPER_MIN_WIDTH`, `QS_WALLPAPER_MIN_HEIGHT`, `QS_WALLPAPER_MAX_RATIO_ERROR`, `QS_WALLPAPER_CONNECT_TIMEOUT`, `QS_WALLPAPER_TOTAL_TIMEOUT` and `QS_WALLPAPER_RETRIES`.
+Useful environment overrides before launching include:
+
+```bash
+export QS_WALLPAPER_DIR="$HOME/Pictures/Wallpapers"
+export QS_WALLPAPER_RESULT_LIMIT=12
+export QS_WALLPAPER_CANDIDATE_LIMIT=72
+export QS_WALLPAPER_SEARCH_JOBS=6
+./scripts/open_picker.sh
+```
+
+The wallpaper directory falls back to `$HOME/Wallpapers`. `XDG_CACHE_HOME` is honored when set; otherwise cache state uses `$HOME/.cache/wallpaper_picker`.
+
+Optional desktop integrations are disabled in the public settings template. Enable only the integrations you use by changing the corresponding `enable...` properties in your copied `config/Settings.qml`. ML4W synchronization is separately opt-in with `QS_WALLPAPER_ENABLE_ML4W=1`.
+
+## Troubleshooting
+
+### No local wallpapers appear
+
+Confirm files exist in `QS_WALLPAPER_DIR` or the `wallpaperDir` configured in your copied settings file, then launch with `./scripts/open_picker.sh`.
+
+### Image thumbnails do not appear
+
+Install ImageMagick and confirm `magick` is available. The launcher regenerates missing or outdated thumbnails.
+
+### Video thumbnails do not appear
+
+Install `ffmpeg`. Video playback additionally requires `mpvpaper`.
+
+### Online search returns no results
+
+Try a broader query. Candidates can also be rejected for display dimensions, orientation, aspect ratio, metadata or preview validation.
+
+### Online search times out
+
+Check network access to Wallhaven and increase the validated timeout variables only when necessary. See the advanced reference.
+
+### Download failed
+
+Retry the selection after confirming the destination wallpaper directory is writable. The previous file and online cache remain protected.
+
+### Colors reload unexpectedly
+
+Keep the optional integration flags disabled or check for external color-generation watchers and reload scripts.
+
+> Avoid running multiple automatic color generators simultaneously because competing watchers may overwrite Hyprland or Waybar color files.
 
 ## Advanced documentation
 
-See [Advanced online-discovery details](docs/online-discovery.md) for retrieval strategies, quality filters, the deterministic score, preview validation, failure behavior, configuration, developer testing and the atomic publication pointer.
-
-Metadata ranking improves measurable display fit and source quality. It does not claim to understand subjective artistic quality or perform AI aesthetic analysis.
+See the [advanced online-discovery reference](docs/online-discovery.md) for ranking, cache safety, configuration and testing details.
 
 ## Privacy
 
-- Online search terms and display constraints are sent to Wallhaven.
-- Validated preview images download during an explicit online search.
+- Online search sends the normalized query and display constraints to Wallhaven.
+- Preview images download during explicit online search.
 - Full-resolution images download only after selection.
-- Local wallpaper filenames and personal account data are not sent.
+- Local wallpaper filenames and personal account data are not transmitted.
 - No cloud AI service or online account is required.
 
 ## Credits
 
-QS Wallpaper Picker was created by **Magetsu**.
+Created and maintained by **Magetsu**.
 
-The original online-search contribution was implemented by **bay0n**. Its existing co-author attribution remains preserved in Git history, and the quality engine builds on that work.
+Original UI design adapted from [ilyamiro's NixOS configuration](https://github.com/ilyamiro/nixos-configuration).
+
+Original online-search contribution by **bay0n**. The quality-ranking engine builds on that contribution, and existing Git co-author attribution remains preserved.
 
 ## License
 
