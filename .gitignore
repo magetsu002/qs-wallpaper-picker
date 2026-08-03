@@ -4,3 +4,4 @@ config/Settings.qml
 __pycache__/
 *.pyc
 *~
+*.before-*

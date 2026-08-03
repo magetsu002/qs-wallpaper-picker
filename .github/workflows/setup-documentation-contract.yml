@@ -1,0 +1,296 @@
+name: Setup and Documentation Contract
+
+on:
+  push:
+    branches:
+      - feat/high-quality-online-wallpaper-engine-v1
+  pull_request:
+    branches:
+      - integration/bayon-online-search-20260803T144613
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: setup-docs-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REQUIRED_BASE_SHA: bf589735b18da4b7aed2bd903969e392cb3de06d
+
+jobs:
+  contract:
+    name: Fresh-clone and documentation contract
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Check out exact revision
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Verify exact feature revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="${{ github.event.pull_request.head.sha || github.sha }}"
+          test "$(git rev-parse HEAD)" = "$expected"
+          git cat-file -e "${REQUIRED_BASE_SHA}^{commit}"
+
+      - name: Set up certified Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Run network-independent production tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Compile Python sources and tests
+        run: python -m compileall -q scripts tests
+
+      - name: Validate shell scripts and executable bits
+        shell: bash
+        run: |
+          set -euo pipefail
+          while IFS= read -r script; do
+            bash -n "$script"
+          done < <(git ls-files 'scripts/*.sh')
+
+          while read -r mode _stage _sha path; do
+            test "$mode" = "100755" || {
+              echo "Shell entry point is not executable: $path ($mode)" >&2
+              exit 1
+            }
+          done < <(git ls-files -s 'scripts/*.sh')
+
+      - name: Verify fresh-clone configuration and launcher
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -f config/Settings.qml.example
+          grep -Fq 'cp config/Settings.qml.example config/Settings.qml' README.md
+          grep -Fq './scripts/open_picker.sh' README.md
+          test -x scripts/open_picker.sh
+          grep -Fq 'sync_thumbs.sh' scripts/open_picker.sh
+          grep -Fq 'exec quickshell -p "$PROJECT_DIR/Main.qml"' scripts/open_picker.sh
+          grep -Fq 'picker.lock' scripts/open_picker.sh
+          ! grep -Fq 'bash scripts/sync_thumbs.sh' README.md
+          ! grep -Fq '](config/Settings.qml)' README.md
+          grep -Fq '](config/Settings.qml.example)' README.md
+
+      - name: Verify wallpaper-directory and cache contracts
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -Fq 'Quickshell.env("QS_WALLPAPER_DIR")' config/Settings.qml.example
+          grep -Fq '${QS_WALLPAPER_DIR:-$HOME/Wallpapers}' scripts/open_picker.sh
+          grep -Fq '${QS_WALLPAPER_DIR:-$HOME/Wallpapers}' scripts/sync_thumbs.sh
+          grep -Fq '${QS_WALLPAPER_DIR:-$HOME/Wallpapers}' scripts/restore_wallpaper.sh
+          grep -Fq 'readonly property string srcDir: settings.wallpaperDir' WallpaperPicker.qml
+
+          grep -Fq 'Quickshell.env("XDG_CACHE_HOME")' config/Settings.qml.example
+          grep -Fq '${XDG_CACHE_HOME:-$HOME/.cache}' scripts/cache_paths.sh
+          grep -Fq 'ensure_wallpaper_cache_compatibility' scripts/open_picker.sh
+          grep -Fq 'ln -s -- "$cache_dir" "$legacy_dir"' scripts/cache_paths.sh
+          grep -Fq 'CacheLayout.from_environment' scripts/wallpaper_search.py
+          grep -Fq 'XDG_CACHE_HOME' scripts/wallpaper_search.py
+          grep -Fq 'wallpaper_cache_dir' scripts/sync_thumbs.sh
+          grep -Fq 'wallpaper_cache_dir' scripts/restore_wallpaper.sh
+
+      - name: Verify authoritative Escape behavior
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(grep -Fc 'sequence: "Escape"' Main.qml)" -eq 1
+          test "$(grep -Fc 'sequence: "Escape"' WallpaperPicker.qml)" -eq 1
+          grep -Fq 'picker.currentFilter !== "Search"' Main.qml
+          grep -Fq 'window.currentFilter === "Search"' WallpaperPicker.qml
+          grep -Fq 'window.currentFilter = "All"' WallpaperPicker.qml
+          grep -Fq 'Escape in Search' README.md
+          grep -Fq 'Escape elsewhere' README.md
+
+      - name: Verify safe optional defaults
+        shell: bash
+        run: |
+          set -euo pipefail
+          for setting in \
+            enableDynamicColors enableMatugen enableHyprReload \
+            enableWaybarReload enableKittyReload enableCavaReload \
+            enableSwayncReload enableSwayosdReload
+          do
+            grep -Eq "property bool ${setting}:[[:space:]]*false" config/Settings.qml.example
+          done
+          grep -Fq 'QS_WALLPAPER_ENABLE_ML4W:-0' scripts/open_picker.sh
+          grep -Fq 'QS_WALLPAPER_ENABLE_ML4W:-0' scripts/restore_wallpaper.sh
+          grep -Fq 'ENABLE_MATUGEN="${ENABLE_MATUGEN:-0}"' scripts/matugen_reload.sh
+
+      - name: Verify README links, preview, dependencies and credits
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from html.parser import HTMLParser
+          from pathlib import Path
+          import re
+
+          readme = Path('README.md').read_text(encoding='utf-8')
+
+          if not readme.startswith('# QS Wallpaper Picker\n'):
+              raise SystemExit('README must begin with the product heading.')
+
+          for target in re.findall(r'\[[^\]]+\]\(([^)]+)\)', readme):
+              if '://' in target or target.startswith('#'):
+                  continue
+              path = target.split('#', 1)[0]
+              if path and not Path(path).exists():
+                  raise SystemExit(f'Broken tracked README link: {target}')
+
+          class PreviewParser(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.center_depth = 0
+                  self.center_blocks = 0
+                  self.preview_images = []
+                  self.unbalanced = False
+
+              def handle_starttag(self, tag, attrs):
+                  values = dict(attrs)
+                  if tag == 'p' and values.get('align', '').lower() == 'center':
+                      self.center_depth += 1
+                      self.center_blocks += 1
+                  elif tag == 'p' and self.center_depth:
+                      self.center_depth += 1
+                  if tag == 'img' and self.center_depth:
+                      self.preview_images.append(values)
+
+              def handle_startendtag(self, tag, attrs):
+                  if tag == 'img' and self.center_depth:
+                      self.preview_images.append(dict(attrs))
+
+              def handle_endtag(self, tag):
+                  if tag == 'p':
+                      if self.center_depth == 0:
+                          self.unbalanced = True
+                      else:
+                          self.center_depth -= 1
+
+          parser = PreviewParser()
+          parser.feed(readme)
+          if parser.unbalanced or parser.center_depth != 0:
+              raise SystemExit('README preview HTML is unbalanced.')
+          if parser.center_blocks != 1 or len(parser.preview_images) != 1:
+              raise SystemExit('README must contain one centered preview image.')
+
+          preview = parser.preview_images[0]
+          approved_url = (
+              'https://github.com/user-attachments/assets/'
+              'd14fce0d-4ef9-4cca-8c41-94e4ffd893bd'
+          )
+          if preview.get('src') != approved_url:
+              raise SystemExit('README preview does not use the approved image URL.')
+          alt = preview.get('alt', '').strip()
+          if len(alt) < 12 or 'wallpaper' not in alt.lower():
+              raise SystemExit('README preview needs meaningful alt text.')
+          if 'add the final picker screenshot' in readme.lower():
+              raise SystemExit('Obsolete pending-screenshot placeholder remains.')
+
+          headings = (
+              '## Quick start',
+              '## Local and online search',
+              '## Requirements',
+              '## Configuration',
+              '## Troubleshooting',
+              '## Advanced documentation',
+              '## Privacy',
+              '## Credits',
+              '## License',
+          )
+          missing_headings = [heading for heading in headings if heading not in readme]
+          if missing_headings:
+              raise SystemExit(f'Missing README headings: {missing_headings}')
+
+          exact_contract = (
+              'cp config/Settings.qml.example config/Settings.qml',
+              './scripts/open_picker.sh',
+              '](docs/online-discovery.md)',
+          )
+          absent = [item for item in exact_contract if item not in readme]
+          if absent:
+              raise SystemExit(f'Missing README setup/link contract: {absent}')
+
+          semantic_patterns = {
+              'local filename search': r'typ(?:e|ing).*local.*wallpaper.*filename',
+              'Enter-triggered Wallhaven search': r'enter.*search(?:es|ing)?.*wallhaven',
+              'ImageMagick dependency': r'imagemagick',
+              'ffmpeg dependency': r'ffmpeg',
+              'mpvpaper dependency': r'mpvpaper',
+              'Python 3.12 certification': r'python\s+3\.12.*certified by ci',
+              'Magetsu ownership': r'created and maintained by\s+\*\*magetsu\*\*',
+              'ilyamiro interface attribution': r'interface.*adapted.*ilyamiro|ilyamiro.*interface',
+              'contributor recognition': r'bay0n|contributors?|git history',
+              'privacy behavior': r'local wallpaper filenames.*not transmitted',
+              'configuration behavior': r'qs_wallpaper_dir',
+              'local-wallpaper troubleshooting': r'no local wallpapers appear',
+              'download-failure troubleshooting': r'failed downloads?|fails? to download',
+          }
+          missing = [
+              name for name, pattern in semantic_patterns.items()
+              if not re.search(pattern, readme, re.IGNORECASE | re.DOTALL)
+          ]
+          if missing:
+              raise SystemExit(f'Missing README semantic contracts: {missing}')
+          PY
+
+      - name: Verify advanced architecture and troubleshooting
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+
+          doc = Path('docs/online-discovery.md').read_text(encoding='utf-8')
+          required = (
+              '## Table of contents',
+              'window shell and top-level presentation',
+              'local and online search UI',
+              'request invalidation and stale-result rejection',
+              'online selection state machine',
+              'XDG_CACHE_HOME',
+              'QS_WALLPAPER_DIR',
+              'Escape while Search is active',
+              'No local thumbnails',
+              'Selected download failure',
+              'Reset only the online cache',
+              'ImageMagick',
+              'ffmpeg',
+          )
+          missing = [item for item in required if item not in doc]
+          if missing:
+              raise SystemExit(f'Missing advanced-document contract text: {missing}')
+          PY
+
+      - name: Verify preserved production behavior and safety
+        shell: bash
+        run: |
+          set -euo pipefail
+          grep -Fq 'getSourceFileName' WallpaperPicker.qml
+          grep -Fq 'mpvpaper' WallpaperPicker.qml
+          grep -Fq 'triggerColorExtraction' WallpaperPicker.qml
+          grep -Fq 'online_search.sh' WallpaperPicker.qml
+          grep -Fq -- '--download' WallpaperPicker.qml
+          grep -Fq 'download_full_wallpaper' scripts/preview_pipeline.py
+          grep -Fq 'rank_payloads' tests/test_wallpaper_search.py
+          grep -Fq 'download_ranked_previews' tests/test_preview_pipeline.py
+
+          git diff --check "${REQUIRED_BASE_SHA}...HEAD"
+          added_lines="$(
+            git diff --unified=0 "${REQUIRED_BASE_SHA}...HEAD" -- . \
+              ':(exclude).github/workflows/*.yml' \
+              | grep '^+' | grep -v '^+++' || true
+          )"
+          ! grep -Eq '/home/[A-Za-z0-9._-]+' <<<"$added_lines"
+          ! grep -Eiq 'pkill[[:space:]]+(-[^[:space:]]+[[:space:]]+)*quickshell' <<<"$added_lines"
+          ! grep -Eq '(sk-[A-Za-z0-9_-]{20,}|gh[pousr]_[A-Za-z0-9]{30,}|BEGIN (RSA|OPENSSH|EC) PRIVATE KEY)' <<<"$added_lines"
