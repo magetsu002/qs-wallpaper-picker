@@ -81,6 +81,84 @@ jobs:
           grep -Fq 'triggerOnlineSearch(normalized)' Main.qml
           grep -Fq -- '--download' scripts/preview_pipeline.py
           grep -Fq 'download_full_wallpaper' scripts/preview_pipeline.py
+          grep -Fq 'id: onlineDownloadProcess' WallpaperPicker.qml
+          grep -Fq 'window.resolveProjectScript("scripts/online_search.sh")' WallpaperPicker.qml
+          grep -Fq '"--download"' WallpaperPicker.qml
+          grep -Fq '"--destination"' WallpaperPicker.qml
+          if grep -Fq 'URL=$(awk -F' WallpaperPicker.qml; then
+            echo 'Legacy inline map lookup remains in WallpaperPicker.qml.' >&2
+            exit 1
+          fi
+          if grep -Eq 'curl[[:space:]].*DEST_FILE' WallpaperPicker.qml; then
+            echo 'Legacy inline full-resolution curl remains in WallpaperPicker.qml.' >&2
+            exit 1
+          fi
+
+      - name: Verify QML download state machine
+        shell: bash
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          from pathlib import Path
+          import re
+
+          qml = Path('WallpaperPicker.qml').read_text(encoding='utf-8')
+
+          command = re.compile(
+              r'onlineDownloadProcess\.command\s*=\s*\[\s*'
+              r'"bash",\s*'
+              r'window\.resolveProjectScript\("scripts/online_search\.sh"\),\s*'
+              r'"--download",\s*safeFileName,\s*'
+              r'"--destination",\s*destination\s*\]',
+              re.DOTALL,
+          )
+          if not command.search(qml):
+              raise SystemExit('Downloader arguments are not passed as the required array.')
+
+          forbidden = (
+              'URL=$(awk -F',
+              'curl -s -L',
+              'curl --location',
+              'MAP_FILE=',
+          )
+          present = [value for value in forbidden if value in qml]
+          if present:
+              raise SystemExit(f'Legacy inline downloader fragments remain: {present}')
+
+          start = qml.index('id: onlineDownloadProcess')
+          end = qml.index('id: onlineSearchProcess', start)
+          exit_block = qml[start:end]
+          success = exit_block.index('if (exitCode === 0')
+          apply = exit_block.index(
+              'window.applyDownloadedOnlineWallpaper(completedName)'
+          )
+          failure = exit_block.index(
+              'window.onlineSearchError = "Download failed"'
+          )
+          if not success < apply < failure:
+              raise SystemExit('Download success/failure ordering is invalid.')
+          if 'applyDownloadedOnlineWallpaper' in exit_block[failure:]:
+              raise SystemExit('Failure path can trigger wallpaper application.')
+          if 'window.requestClose()' in exit_block:
+              raise SystemExit('Download process closes the picker before success.')
+
+          required = (
+              'window.isDownloadingWallpaper || onlineDownloadProcess.running',
+              'window.isApplying = false',
+              'window.isDownloaded(safeFileName)',
+              'window.applyDownloadedOnlineWallpaper(safeFileName)',
+              'window.startOnlineDownload(safeFileName, destFile)',
+              'const realFileName =',
+              'window.getSourceFileName(',
+              'mpvpaper',
+              'triggerColorExtraction',
+              'ENABLE_MATUGEN',
+              'QS_WALLPAPER_ENABLE_ML4W',
+          )
+          missing = [value for value in required if value not in qml]
+          if missing:
+              raise SystemExit(f'Missing production behavior markers: {missing}')
+          PY
 
       - name: Verify preserved desktop behavior remains represented
         shell: bash
@@ -132,6 +210,14 @@ jobs:
           from pathlib import Path
 
           readme = Path('README.md').read_text(encoding='utf-8')
+          advanced_path = Path('docs/online-discovery.md')
+          advanced = (
+              advanced_path.read_text(encoding='utf-8')
+              if advanced_path.exists()
+              else ''
+          )
+          combined = readme + '\n' + advanced
+
           required_variables = {
               'QS_WALLPAPER_TARGET_WIDTH',
               'QS_WALLPAPER_TARGET_HEIGHT',
@@ -145,7 +231,7 @@ jobs:
               'QS_WALLPAPER_TOTAL_TIMEOUT',
               'QS_WALLPAPER_RETRIES',
           }
-          missing = sorted(name for name in required_variables if name not in readme)
+          missing = sorted(name for name in required_variables if name not in combined)
           if missing:
               raise SystemExit(f'Missing configuration documentation: {missing}')
 
@@ -156,9 +242,23 @@ jobs:
               'bay0n',
               'does not claim to understand subjective artistic quality',
           )
-          absent = [text for text in required_docs if text not in readme]
+          absent = [text for text in required_docs if text not in combined]
           if absent:
               raise SystemExit(f'Missing required documentation: {absent}')
+
+          if advanced_path.exists():
+              required_readme = (
+                  'A fast keyboard-first Quickshell wallpaper picker',
+                  '<!-- Add the final picker screenshot here after capture. Suggested path: docs/assets/wallpaper-picker-preview.png -->',
+                  'docs/online-discovery.md',
+                  'Typing filters local wallpaper filenames.',
+                  'Pressing Enter searches Wallhaven, even when local matches exist.',
+              )
+              missing_readme = [text for text in required_readme if text not in readme]
+              if missing_readme:
+                  raise SystemExit(
+                      f'Missing product README content: {missing_readme}'
+                  )
           PY
 
       - name: Confirm deterministic test coverage executes production code
