@@ -1,15 +1,9 @@
 #!/usr/bin/env python3
-"""Wallhaven search foundation for qs-wallpaper-picker.
+"""Deterministic Wallhaven discovery for qs-wallpaper-picker.
 
-Milestone 1 establishes:
-- safe query normalization
-- monotonic request generations
-- stale publication rejection under an fcntl lock
-- display-size detection with validated environment overrides
-- immutable generation directories with one atomic current pointer
-- backward-compatible output for the existing QML consumer
-
-Later milestones extend ranking and preview validation without changing the CLI.
+The module is standard-library only. It keeps the shell/QML interface stable
+while separating request authority, candidate normalization, deterministic
+ranking and cache publication into testable production functions.
 """
 
 from __future__ import annotations
@@ -17,7 +11,9 @@ from __future__ import annotations
 import argparse
 import contextlib
 import fcntl
+import ipaddress
 import json
+import math
 import os
 import re
 import shutil
@@ -28,24 +24,55 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any, Iterable, Mapping
 
 API_URL = "https://wallhaven.cc/api/v1/search"
 USER_AGENT = "qs-wallpaper-picker/3.0"
 MAX_QUERY_LENGTH = 160
 DEFAULT_WIDTH = 1920
 DEFAULT_HEIGHT = 1080
-DEFAULT_RESULT_LIMIT = 24
+DEFAULT_RESULT_LIMIT = 12
+DEFAULT_CANDIDATE_LIMIT = 72
 DEFAULT_JOBS = 6
 DEFAULT_CONNECT_TIMEOUT = 8.0
 DEFAULT_TOTAL_TIMEOUT = 30.0
-ALLOWED_IMAGE_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+DEFAULT_RETRIES = 1
+DEFAULT_MAX_RATIO_ERROR = 0.20
+MAX_RESULT_LIMIT = 24
+MAX_CANDIDATE_LIMIT = 72
+MAX_JOBS = 16
+
+API_HOSTS = frozenset({"wallhaven.cc"})
+FULL_IMAGE_HOSTS = frozenset({"w.wallhaven.cc"})
+PREVIEW_HOSTS = frozenset({"th.wallhaven.cc"})
+ALLOWED_IMAGE_SUFFIXES = frozenset({".jpg", ".jpeg", ".png", ".webp"})
+ID_PATTERN = re.compile(r"^[A-Za-z0-9]{2,32}$")
+
+STRATEGIES = (
+    ("relevance", "relevance", None),
+    ("toplist", "toplist", "1M"),
+    ("favorites", "favorites", None),
+)
+STRATEGY_PRIORITY = {
+    "relevance": 0,
+    "toplist": 1,
+    "favorites": 2,
+}
+STRATEGY_BASE_SCORE = {
+    "relevance": 24.0,
+    "toplist": 22.0,
+    "favorites": 20.0,
+}
 
 
 class SearchError(RuntimeError):
     """User-facing online search failure."""
+
+
+class CandidateRejected(SearchError):
+    """Raised when one candidate violates a hard quality rule."""
 
 
 class StaleRequest(SearchError):
@@ -57,9 +84,14 @@ class RuntimeConfig:
     target_width: int
     target_height: int
     result_limit: int
+    candidate_limit: int
     jobs: int
+    min_width: int
+    min_height: int
+    max_ratio_error: float
     connect_timeout: float
     total_timeout: float
+    retries: int
 
 
 @dataclass(frozen=True)
@@ -74,7 +106,7 @@ class CacheLayout:
     legacy_map: Path
 
     @classmethod
-    def from_environment(cls, env: dict[str, str] | None = None) -> "CacheLayout":
+    def from_environment(cls, env: Mapping[str, str] | None = None) -> "CacheLayout":
         values = os.environ if env is None else env
         home = Path(values.get("HOME") or str(Path.home()))
         cache_home = Path(values.get("XDG_CACHE_HOME") or home / ".cache")
@@ -90,6 +122,58 @@ class CacheLayout:
             legacy_thumbs=root / "search_thumbs",
             legacy_map=root / "search_map.txt",
         )
+
+
+@dataclass
+class Candidate:
+    wallpaper_id: str
+    full_url: str
+    preview_url: str
+    width: int
+    height: int
+    file_size: int | None
+    favorites: int | None
+    views: int | None
+    file_name: str
+    sources: dict[str, int] = field(default_factory=dict)
+    ratio_error: float = 0.0
+    ratio_score: float = 0.0
+    resolution_score: float = 0.0
+    source_score: float = 0.0
+    popularity_score: float = 0.0
+    file_size_score: float = 0.0
+    total_score: float = 0.0
+
+    def as_manifest(self) -> dict[str, Any]:
+        return {
+            "id": self.wallpaper_id,
+            "file_name": self.file_name,
+            "full_url": self.full_url,
+            "preview_url": self.preview_url,
+            "width": self.width,
+            "height": self.height,
+            "file_size": self.file_size,
+            "favorites": self.favorites,
+            "views": self.views,
+            "sources": [
+                {
+                    "name": name,
+                    "position": self.sources[name],
+                }
+                for name in sorted(
+                    self.sources,
+                    key=lambda value: STRATEGY_PRIORITY[value],
+                )
+            ],
+            "score": round(self.total_score, 6),
+            "score_components": {
+                "source": round(self.source_score, 6),
+                "ratio": round(self.ratio_score, 6),
+                "resolution": round(self.resolution_score, 6),
+                "popularity": round(self.popularity_score, 6),
+                "file_size": round(self.file_size_score, 6),
+            },
+        }
 
 
 def normalize_query(raw: str) -> str:
@@ -135,8 +219,32 @@ def _positive_float(
         value = float(raw)
     except ValueError as exc:
         raise SearchError(f"{name} must be numeric.") from exc
-    if not minimum <= value <= maximum:
+    if not math.isfinite(value) or not minimum <= value <= maximum:
         raise SearchError(f"{name} must be between {minimum} and {maximum}.")
+    return value
+
+
+def _optional_nonnegative_int(raw: Any) -> int | None:
+    if raw is None or raw == "":
+        return None
+    if isinstance(raw, bool):
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
+
+
+def _required_positive_int(name: str, raw: Any) -> int:
+    if isinstance(raw, bool):
+        raise CandidateRejected(f"{name} is invalid.")
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise CandidateRejected(f"{name} is invalid.") from exc
+    if value <= 0:
+        raise CandidateRejected(f"{name} must be positive.")
     return value
 
 
@@ -151,7 +259,7 @@ def _parse_dimensions_text(text: str) -> tuple[int, int] | None:
 
 
 def detect_display_dimensions(
-    env: dict[str, str] | None = None,
+    env: Mapping[str, str] | None = None,
     command_runner: Any = subprocess.run,
 ) -> tuple[int, int]:
     values = os.environ if env is None else env
@@ -228,23 +336,56 @@ def detect_display_dimensions(
 
 
 def load_runtime_config(
-    env: dict[str, str] | None = None,
+    env: Mapping[str, str] | None = None,
     command_runner: Any = subprocess.run,
 ) -> RuntimeConfig:
     values = os.environ if env is None else env
     width, height = detect_display_dimensions(values, command_runner)
+
     result_limit = _positive_int(
         "QS_WALLPAPER_RESULT_LIMIT",
         values.get("QS_WALLPAPER_RESULT_LIMIT")
         or values.get("QS_WALLPAPER_SEARCH_LIMIT"),
         DEFAULT_RESULT_LIMIT,
-        maximum=24,
+        maximum=MAX_RESULT_LIMIT,
     )
+    candidate_limit = _positive_int(
+        "QS_WALLPAPER_CANDIDATE_LIMIT",
+        values.get("QS_WALLPAPER_CANDIDATE_LIMIT"),
+        DEFAULT_CANDIDATE_LIMIT,
+        minimum=len(STRATEGIES),
+        maximum=MAX_CANDIDATE_LIMIT,
+    )
+    if result_limit > candidate_limit:
+        raise SearchError(
+            "QS_WALLPAPER_RESULT_LIMIT cannot exceed "
+            "QS_WALLPAPER_CANDIDATE_LIMIT."
+        )
+
     jobs = _positive_int(
         "QS_WALLPAPER_SEARCH_JOBS",
         values.get("QS_WALLPAPER_SEARCH_JOBS"),
         DEFAULT_JOBS,
-        maximum=16,
+        maximum=MAX_JOBS,
+    )
+    min_width = _positive_int(
+        "QS_WALLPAPER_MIN_WIDTH",
+        values.get("QS_WALLPAPER_MIN_WIDTH"),
+        width,
+        maximum=16384,
+    )
+    min_height = _positive_int(
+        "QS_WALLPAPER_MIN_HEIGHT",
+        values.get("QS_WALLPAPER_MIN_HEIGHT"),
+        height,
+        maximum=16384,
+    )
+    max_ratio_error = _positive_float(
+        "QS_WALLPAPER_MAX_RATIO_ERROR",
+        values.get("QS_WALLPAPER_MAX_RATIO_ERROR"),
+        DEFAULT_MAX_RATIO_ERROR,
+        minimum=0.01,
+        maximum=0.75,
     )
     connect_timeout = _positive_float(
         "QS_WALLPAPER_CONNECT_TIMEOUT",
@@ -265,13 +406,26 @@ def load_runtime_config(
             "QS_WALLPAPER_CONNECT_TIMEOUT cannot exceed "
             "QS_WALLPAPER_TOTAL_TIMEOUT."
         )
+    retries = _positive_int(
+        "QS_WALLPAPER_RETRIES",
+        values.get("QS_WALLPAPER_RETRIES"),
+        DEFAULT_RETRIES,
+        minimum=0,
+        maximum=3,
+    )
+
     return RuntimeConfig(
         target_width=width,
         target_height=height,
         result_limit=result_limit,
+        candidate_limit=candidate_limit,
         jobs=jobs,
+        min_width=min_width,
+        min_height=min_height,
+        max_ratio_error=max_ratio_error,
         connect_timeout=connect_timeout,
         total_timeout=total_timeout,
+        retries=retries,
     )
 
 
@@ -319,39 +473,179 @@ def _atomic_write_text(path: Path, content: str) -> None:
     os.replace(temp, path)
 
 
-def _request_json(url: str, timeout: float) -> dict[str, Any]:
+def validate_url(url: str, purpose: str) -> str:
+    try:
+        parsed = urllib.parse.urlsplit(str(url).strip())
+    except ValueError as exc:
+        raise CandidateRejected("Malformed URL.") from exc
+
+    if parsed.scheme != "https":
+        raise CandidateRejected("Only HTTPS URLs are allowed.")
+    if parsed.username is not None or parsed.password is not None:
+        raise CandidateRejected("URLs with embedded credentials are not allowed.")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise CandidateRejected("URL port is invalid.") from exc
+    if port not in (None, 443):
+        raise CandidateRejected("Unexpected URL port.")
+
+    host = (parsed.hostname or "").rstrip(".").lower()
+    if not host:
+        raise CandidateRejected("URL host is missing.")
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        address = None
+    if address is not None and (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_reserved
+    ):
+        raise CandidateRejected("Private or local network URLs are not allowed.")
+
+    allowed_hosts = {
+        "api": API_HOSTS,
+        "full": FULL_IMAGE_HOSTS,
+        "preview": PREVIEW_HOSTS,
+    }.get(purpose)
+    if allowed_hosts is None or host not in allowed_hosts:
+        raise CandidateRejected(f"Unexpected {purpose} URL host.")
+
+    if purpose == "api" and parsed.path != "/api/v1/search":
+        raise CandidateRejected("Unexpected Wallhaven API path.")
+    if purpose == "full" and not parsed.path.startswith("/full/"):
+        raise CandidateRejected("Unexpected full-resolution path.")
+    if purpose == "preview" and not parsed.path.startswith(("/lg/", "/orig/", "/small/")):
+        raise CandidateRejected("Unexpected preview path.")
+
+    return urllib.parse.urlunsplit(parsed)
+
+
+class SafeRedirectHandler(urllib.request.HTTPRedirectHandler):
+    max_redirections = 3
+    max_repeats = 1
+
+    def __init__(self, purpose: str):
+        super().__init__()
+        self.purpose = purpose
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        validate_url(newurl, self.purpose)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _open_url(url: str, purpose: str, timeout: float):
+    validated = validate_url(url, purpose)
+    opener = urllib.request.build_opener(SafeRedirectHandler(purpose))
     request = urllib.request.Request(
-        url,
+        validated,
         headers={
             "User-Agent": USER_AGENT,
-            "Accept": "application/json",
+            "Accept": "application/json" if purpose == "api" else "image/*",
         },
     )
-    try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
-            payload = response.read()
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
-        raise SearchError(f"Wallhaven request failed: {exc}") from exc
-    try:
-        parsed = json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise SearchError("Wallhaven returned invalid JSON.") from exc
-    if not isinstance(parsed, dict):
-        raise SearchError("Wallhaven returned an invalid response.")
-    return parsed
+    response = opener.open(request, timeout=timeout)
+    validate_url(response.geturl(), purpose)
+    return response
 
 
-def build_search_url(query: str, result_limit: int) -> str:
-    params = urllib.parse.urlencode(
-        {
+def _request_json(
+    url: str,
+    *,
+    connect_timeout: float,
+    total_timeout: float,
+    retries: int,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + total_timeout
+    last_error: Exception | None = None
+
+    for attempt in range(retries + 1):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            with _open_url(
+                url,
+                "api",
+                min(connect_timeout, remaining),
+            ) as response:
+                payload = response.read()
+            parsed = json.loads(payload.decode("utf-8"))
+            if not isinstance(parsed, dict):
+                raise SearchError("Wallhaven returned an invalid response.")
+            return parsed
+        except (
+            urllib.error.URLError,
+            TimeoutError,
+            OSError,
+            UnicodeDecodeError,
+            json.JSONDecodeError,
+            CandidateRejected,
+        ) as exc:
+            last_error = exc
+            if attempt < retries:
+                time.sleep(min(0.25 * (2**attempt), max(0.0, deadline - time.monotonic())))
+
+    raise SearchError(f"Wallhaven request failed: {last_error or 'timeout'}")
+
+
+def _strategy_counts(candidate_limit: int) -> list[int]:
+    remaining = candidate_limit
+    counts: list[int] = []
+    for index in range(len(STRATEGIES)):
+        slots = len(STRATEGIES) - index
+        count = min(24, math.ceil(remaining / slots))
+        counts.append(count)
+        remaining -= count
+    return counts
+
+
+def build_strategy_requests(
+    query: str,
+    config: RuntimeConfig,
+) -> list[tuple[str, str]]:
+    requests: list[tuple[str, str]] = []
+    for (name, sorting, top_range), per_page in zip(
+        STRATEGIES,
+        _strategy_counts(config.candidate_limit),
+        strict=True,
+    ):
+        params = {
             "q": query,
             "purity": "100",
-            "sorting": "relevance",
+            "sorting": sorting,
             "order": "desc",
-            "per_page": str(result_limit),
+            "per_page": str(per_page),
+            "atleast": f"{config.min_width}x{config.min_height}",
         }
-    )
-    return f"{API_URL}?{params}"
+        if top_range is not None:
+            params["topRange"] = top_range
+        url = f"{API_URL}?{urllib.parse.urlencode(params)}"
+        validate_url(url, "api")
+        requests.append((name, url))
+    return requests
+
+
+def retrieve_payloads(
+    query: str,
+    config: RuntimeConfig,
+) -> dict[str, dict[str, Any]]:
+    payloads: dict[str, dict[str, Any]] = {}
+    deadline = time.monotonic() + config.total_timeout
+
+    for name, url in build_strategy_requests(query, config):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise SearchError("Wallhaven candidate retrieval timed out.")
+        payloads[name] = _request_json(
+            url,
+            connect_timeout=min(config.connect_timeout, remaining),
+            total_timeout=remaining,
+            retries=config.retries,
+        )
+    return payloads
 
 
 def _safe_filename(wallpaper_id: str, full_url: str) -> str:
@@ -359,6 +653,251 @@ def _safe_filename(wallpaper_id: str, full_url: str) -> str:
     if suffix not in ALLOWED_IMAGE_SUFFIXES:
         suffix = ".jpg"
     return f"wallhaven-{wallpaper_id}{suffix}"
+
+
+def normalize_candidate(
+    raw: Mapping[str, Any],
+    strategy: str,
+    position: int,
+    config: RuntimeConfig,
+) -> Candidate:
+    wallpaper_id = str(raw.get("id") or "").strip()
+    if not ID_PATTERN.fullmatch(wallpaper_id):
+        raise CandidateRejected("Wallpaper ID is missing or malformed.")
+
+    full_url = validate_url(str(raw.get("path") or ""), "full")
+    thumbs = raw.get("thumbs")
+    if not isinstance(thumbs, Mapping):
+        raise CandidateRejected("Preview metadata is missing.")
+    preview_url = validate_url(
+        str(
+            thumbs.get("large")
+            or thumbs.get("original")
+            or thumbs.get("small")
+            or ""
+        ),
+        "preview",
+    )
+
+    width = _required_positive_int("dimension_x", raw.get("dimension_x"))
+    height = _required_positive_int("dimension_y", raw.get("dimension_y"))
+    if width < config.min_width or height < config.min_height:
+        raise CandidateRejected("Wallpaper is below the minimum dimensions.")
+
+    target_landscape = config.target_width >= config.target_height
+    if target_landscape and width < height:
+        raise CandidateRejected("Portrait wallpaper rejected for landscape target.")
+    if not target_landscape and height < width:
+        raise CandidateRejected("Landscape wallpaper rejected for portrait target.")
+
+    target_ratio = config.target_width / config.target_height
+    candidate_ratio = width / height
+    ratio_error = abs(candidate_ratio - target_ratio) / target_ratio
+    if ratio_error > config.max_ratio_error:
+        raise CandidateRejected("Wallpaper aspect ratio is outside the allowed range.")
+
+    file_size = _optional_nonnegative_int(raw.get("file_size"))
+    if raw.get("file_size") is not None and file_size is None:
+        file_size = None
+    if file_size == 0:
+        raise CandidateRejected("Wallpaper file size is invalid.")
+
+    candidate = Candidate(
+        wallpaper_id=wallpaper_id,
+        full_url=full_url,
+        preview_url=preview_url,
+        width=width,
+        height=height,
+        file_size=file_size,
+        favorites=_optional_nonnegative_int(raw.get("favorites")),
+        views=_optional_nonnegative_int(raw.get("views")),
+        file_name=_safe_filename(wallpaper_id, full_url),
+        sources={strategy: position},
+        ratio_error=ratio_error,
+    )
+    _score_candidate(candidate, config)
+    return candidate
+
+
+def _source_score(sources: Mapping[str, int]) -> float:
+    best = max(STRATEGY_BASE_SCORE[name] for name in sources)
+    cross_source_bonus = 3.0 * max(0, len(sources) - 1)
+    return min(30.0, best + cross_source_bonus)
+
+
+def _ratio_score(ratio_error: float, max_ratio_error: float) -> float:
+    return 25.0 * max(0.0, 1.0 - ratio_error / max_ratio_error)
+
+
+def _resolution_score(candidate: Candidate, config: RuntimeConfig) -> float:
+    scale = min(
+        candidate.width / config.target_width,
+        candidate.height / config.target_height,
+    )
+    return 20.0 * min(1.0, max(0.0, scale - 1.0))
+
+
+def _popularity_score(favorites: int | None, views: int | None) -> float:
+    if favorites is None and views is None:
+        return 3.0
+
+    favorite_points = 0.0
+    view_points = 0.0
+    efficiency_points = 0.0
+
+    if favorites is not None:
+        favorite_points = 9.0 * min(
+            1.0,
+            math.log1p(favorites) / math.log1p(5000),
+        )
+    if views is not None:
+        view_points = 4.0 * min(
+            1.0,
+            math.log1p(views) / math.log1p(5_000_000),
+        )
+    if favorites is not None and views is not None:
+        efficiency_points = 2.0 * min(
+            1.0,
+            (favorites / max(1, views)) * 100.0,
+        )
+
+    return min(15.0, favorite_points + view_points + efficiency_points)
+
+
+def _file_size_score(file_size: int | None, pixels: int) -> float:
+    if file_size is None:
+        return 5.0
+
+    bytes_per_pixel = file_size / pixels
+    if bytes_per_pixel < 0.005 or bytes_per_pixel > 10.0:
+        raise CandidateRejected(
+            "Wallpaper file size is unreasonable for its resolution."
+        )
+    if bytes_per_pixel < 0.03:
+        return 10.0 * (bytes_per_pixel - 0.005) / 0.025
+    if bytes_per_pixel <= 0.8:
+        return 10.0
+    if bytes_per_pixel <= 3.0:
+        return 10.0 * (1.0 - (bytes_per_pixel - 0.8) / 2.2)
+    return max(0.0, 2.0 * (1.0 - (bytes_per_pixel - 3.0) / 7.0))
+
+
+def _score_candidate(candidate: Candidate, config: RuntimeConfig) -> None:
+    candidate.source_score = _source_score(candidate.sources)
+    candidate.ratio_score = _ratio_score(
+        candidate.ratio_error,
+        config.max_ratio_error,
+    )
+    candidate.resolution_score = _resolution_score(candidate, config)
+    candidate.popularity_score = _popularity_score(
+        candidate.favorites,
+        candidate.views,
+    )
+    candidate.file_size_score = _file_size_score(
+        candidate.file_size,
+        candidate.width * candidate.height,
+    )
+    candidate.total_score = (
+        candidate.source_score
+        + candidate.ratio_score
+        + candidate.resolution_score
+        + candidate.popularity_score
+        + candidate.file_size_score
+    )
+
+
+def _intrinsic_preference(candidate: Candidate) -> tuple[Any, ...]:
+    return (
+        candidate.width * candidate.height,
+        min(candidate.width, candidate.height),
+        candidate.favorites if candidate.favorites is not None else -1,
+        candidate.views if candidate.views is not None else -1,
+        candidate.wallpaper_id,
+        candidate.full_url,
+        candidate.preview_url,
+    )
+
+
+def _merge_candidate(existing: Candidate, incoming: Candidate, config: RuntimeConfig) -> Candidate:
+    merged_sources = dict(existing.sources)
+    for source, position in incoming.sources.items():
+        merged_sources[source] = min(position, merged_sources.get(source, position))
+
+    preferred = max((existing, incoming), key=_intrinsic_preference)
+    preferred.sources = merged_sources
+    _score_candidate(preferred, config)
+    return preferred
+
+
+def rank_payloads(
+    payloads: Mapping[str, Mapping[str, Any]],
+    config: RuntimeConfig,
+) -> list[Candidate]:
+    normalized: list[Candidate] = []
+
+    for strategy, _, _ in STRATEGIES:
+        payload = payloads.get(strategy, {})
+        data = payload.get("data") if isinstance(payload, Mapping) else None
+        if not isinstance(data, list):
+            continue
+        for position, raw in enumerate(data, start=1):
+            if not isinstance(raw, Mapping):
+                continue
+            try:
+                normalized.append(
+                    normalize_candidate(raw, strategy, position, config)
+                )
+            except CandidateRejected:
+                continue
+
+    normalized.sort(
+        key=lambda candidate: (
+            candidate.wallpaper_id,
+            candidate.full_url,
+            candidate.preview_url,
+            min(STRATEGY_PRIORITY[name] for name in candidate.sources),
+        )
+    )
+
+    unique: list[Candidate] = []
+    by_id: dict[str, int] = {}
+    by_full: dict[str, int] = {}
+    by_preview: dict[str, int] = {}
+
+    for candidate in normalized:
+        duplicate_indexes = {
+            index
+            for index in (
+                by_id.get(candidate.wallpaper_id),
+                by_full.get(candidate.full_url),
+                by_preview.get(candidate.preview_url),
+            )
+            if index is not None
+        }
+
+        if duplicate_indexes:
+            index = min(duplicate_indexes)
+            merged = _merge_candidate(unique[index], candidate, config)
+            unique[index] = merged
+        else:
+            index = len(unique)
+            unique.append(candidate)
+
+        current = unique[index]
+        by_id[current.wallpaper_id] = index
+        by_full[current.full_url] = index
+        by_preview[current.preview_url] = index
+
+    unique.sort(
+        key=lambda candidate: (
+            -round(candidate.total_score, 9),
+            -round(candidate.ratio_score, 9),
+            -round(candidate.resolution_score, 9),
+            min(STRATEGY_PRIORITY[name] for name in candidate.sources),
+            candidate.wallpaper_id,
+        )
+    )
+    return unique[: config.candidate_limit]
 
 
 def _is_probable_image(data: bytes) -> bool:
@@ -370,61 +909,20 @@ def _is_probable_image(data: bytes) -> bool:
 
 
 def _download_preview(url: str, destination: Path, timeout: float) -> bool:
-    request = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": USER_AGENT,
-            "Accept": "image/*",
-        },
-    )
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with _open_url(url, "preview", timeout) as response:
             data = response.read()
-    except (urllib.error.URLError, TimeoutError, OSError):
+    except (
+        urllib.error.URLError,
+        TimeoutError,
+        OSError,
+        CandidateRejected,
+    ):
         return False
     if not _is_probable_image(data):
         return False
     destination.write_bytes(data)
     return True
-
-
-def normalize_basic_candidates(payload: dict[str, Any]) -> list[dict[str, Any]]:
-    data = payload.get("data")
-    if not isinstance(data, list):
-        return []
-
-    results: list[dict[str, Any]] = []
-    seen_ids: set[str] = set()
-    seen_urls: set[str] = set()
-    for raw in data:
-        if not isinstance(raw, dict):
-            continue
-        wallpaper_id = str(raw.get("id") or "").strip()
-        full_url = str(raw.get("path") or "").strip()
-        thumbs = raw.get("thumbs")
-        preview_url = ""
-        if isinstance(thumbs, dict):
-            preview_url = str(
-                thumbs.get("large")
-                or thumbs.get("original")
-                or thumbs.get("small")
-                or ""
-            ).strip()
-        if not wallpaper_id or not full_url or not preview_url:
-            continue
-        if wallpaper_id in seen_ids or full_url in seen_urls:
-            continue
-        seen_ids.add(wallpaper_id)
-        seen_urls.add(full_url)
-        results.append(
-            {
-                "id": wallpaper_id,
-                "full_url": full_url,
-                "preview_url": preview_url,
-                "file_name": _safe_filename(wallpaper_id, full_url),
-            }
-        )
-    return results
 
 
 def _replace_symlink(path: Path, target: str) -> None:
@@ -463,7 +961,7 @@ def publish_generation(
         _replace_symlink(layout.legacy_map, "online/current/search_map.txt")
 
 
-def search(query_raw: str, env: dict[str, str] | None = None) -> list[str]:
+def search(query_raw: str, env: Mapping[str, str] | None = None) -> list[str]:
     query = normalize_query(query_raw)
     config = load_runtime_config(env)
     layout = CacheLayout.from_environment(env)
@@ -480,17 +978,16 @@ def search(query_raw: str, env: dict[str, str] | None = None) -> list[str]:
     previews.mkdir()
 
     try:
-        payload = _request_json(
-            build_search_url(query, config.result_limit),
-            config.total_timeout,
-        )
-        candidates = normalize_basic_candidates(payload)
+        payloads = retrieve_payloads(query, config)
+        ranked = rank_payloads(payloads, config)
 
-        published: list[dict[str, Any]] = []
-        for candidate in candidates[: config.result_limit]:
-            preview_path = previews / candidate["file_name"]
+        published: list[Candidate] = []
+        for candidate in ranked:
+            if len(published) >= config.result_limit:
+                break
+            preview_path = previews / candidate.file_name
             if _download_preview(
-                candidate["preview_url"],
+                candidate.preview_url,
                 preview_path,
                 config.total_timeout,
             ):
@@ -508,20 +1005,22 @@ def search(query_raw: str, env: dict[str, str] | None = None) -> list[str]:
                 "height": config.target_height,
             },
             "status": "online_results",
-            "results": published,
+            "results": [candidate.as_manifest() for candidate in published],
         }
         _atomic_write_text(
             generation / "manifest.json",
             json.dumps(manifest, indent=2, sort_keys=True) + "\n",
         )
         map_text = "".join(
-            f"{item['file_name']}|{item['full_url']}\n" for item in published
+            f"{candidate.file_name}|{candidate.full_url}\n"
+            for candidate in published
         )
         _atomic_write_text(generation / "search_map.txt", map_text)
 
         publish_generation(layout, request_id, generation)
         return [
-            f"{item['file_name']}|{item['full_url']}" for item in published
+            f"{candidate.file_name}|{candidate.full_url}"
+            for candidate in published
         ]
     except Exception:
         shutil.rmtree(generation, ignore_errors=True)
