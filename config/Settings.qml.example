@@ -3,11 +3,21 @@ import Quickshell
 
 QtObject {
     readonly property string homeDir: Quickshell.env("HOME")
+    readonly property string configuredWallpaperDir:
+        Quickshell.env("QS_WALLPAPER_DIR")
+    readonly property string configuredCacheHome:
+        Quickshell.env("XDG_CACHE_HOME")
 
     property string wallpaperDir:
-        homeDir + "/Wallpapers"
+        configuredWallpaperDir !== ""
+            ? configuredWallpaperDir
+            : homeDir + "/Wallpapers"
+    readonly property string cacheHome:
+        configuredCacheHome !== ""
+            ? configuredCacheHome
+            : homeDir + "/.cache"
     readonly property string cacheDir:
-        homeDir + "/.cache/wallpaper_picker"
+        cacheHome + "/wallpaper_picker"
     readonly property string thumbDir:
         cacheDir + "/thumbs"
 
@@ -23,14 +33,14 @@ QtObject {
     property int filterAnimationMs: 800
     property int itemAnimationMs: 500
 
-    property bool enableDynamicColors: true
-    property bool enableMatugen: true
-    property bool enableHyprReload: true
-    property bool enableWaybarReload: true
-    property bool enableKittyReload: true
-    property bool enableCavaReload: true
-    property bool enableSwayncReload: true
-    property bool enableSwayosdReload: true
+    property bool enableDynamicColors: false
+    property bool enableMatugen: false
+    property bool enableHyprReload: false
+    property bool enableWaybarReload: false
+    property bool enableKittyReload: false
+    property bool enableCavaReload: false
+    property bool enableSwayncReload: false
+    property bool enableSwayosdReload: false
 
     property string hyprColorsPath:
         homeDir + "/.config/hypr/colors.conf"

@@ -1,9 +1,16 @@
 #!/usr/bin/env bash
 
-set -u
+set -euo pipefail
+
+SCRIPT_DIR="$(
+    cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &&
+    pwd
+)"
+# shellcheck source=cache_paths.sh
+source "$SCRIPT_DIR/cache_paths.sh"
 
 SOURCE_DIR="${1:-${QS_WALLPAPER_DIR:-$HOME/Wallpapers}}"
-THUMB_DIR="$HOME/.cache/wallpaper_picker/thumbs"
+THUMB_DIR="$(wallpaper_cache_dir)/thumbs"
 
 if [[ ! -d "$SOURCE_DIR" ]]; then
     echo "Wallpaper directory does not exist: $SOURCE_DIR" >&2
@@ -27,9 +34,7 @@ while IFS= read -r -d '' source; do
 
             printf '%s\n' "$thumbnail_name" >>"$EXPECTED"
 
-            if [[ -f "$destination" &&
-                  "$destination" -nt "$source" ]]
-            then
+            if [[ -f "$destination" && "$destination" -nt "$source" ]]; then
                 continue
             fi
 
@@ -59,9 +64,7 @@ while IFS= read -r -d '' source; do
 
             printf '%s\n' "$thumbnail_name" >>"$EXPECTED"
 
-            if [[ -f "$destination" &&
-                  "$destination" -nt "$source" ]]
-            then
+            if [[ -f "$destination" && "$destination" -nt "$source" ]]; then
                 continue
             fi
 

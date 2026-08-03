@@ -36,6 +36,8 @@ FloatingWindow {
 
     Shortcut {
         sequence: "Escape"
+        context: Qt.ApplicationShortcut
+        enabled: !picker.isApplying && picker.currentFilter !== "Search"
         onActivated: Qt.quit()
     }
 

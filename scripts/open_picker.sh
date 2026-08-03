@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-set -u
+set -euo pipefail
 
 SCRIPT_DIR="$(
     cd -- "$(dirname -- "${BASH_SOURCE[0]}")" &&
@@ -11,10 +11,17 @@ PROJECT_DIR="$(
     pwd
 )"
 
-WALLPAPER_DIR="${QS_WALLPAPER_DIR:-$HOME/Wallpapers}"
-STATE_DIR="$HOME/.cache/wallpaper_picker"
+# shellcheck source=cache_paths.sh
+source "$SCRIPT_DIR/cache_paths.sh"
 
-mkdir -p "$STATE_DIR"
+WALLPAPER_DIR="${QS_WALLPAPER_DIR:-$HOME/Wallpapers}"
+STATE_DIR="$(wallpaper_cache_dir)"
+
+ensure_wallpaper_cache_compatibility
+mkdir -p "$WALLPAPER_DIR" "$STATE_DIR"
+
+# Optional ML4W synchronization is opt-in for a fresh clone.
+export QS_WALLPAPER_ENABLE_ML4W="${QS_WALLPAPER_ENABLE_ML4W:-0}"
 
 "$SCRIPT_DIR/sync_thumbs.sh" "$WALLPAPER_DIR"
 
