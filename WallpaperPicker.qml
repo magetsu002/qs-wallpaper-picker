@@ -90,6 +90,8 @@ Item {
     property string _lastFilter: "All"
     property string searchQuery: ""
     property bool isOnlineSearch: false
+    property bool isSearchingOnline: false
+    property string onlineSearchError: ""
     property bool isSearchPaused: false
     property bool hasSearched: false 
     property var colorMap: ({})
@@ -358,16 +360,33 @@ Item {
     property bool isLoading: localFolderModel.status === FolderListModel.Loading || 
                              srcModel.status === FolderListModel.Loading
 
-    property bool showSpinner: window.isDownloadingWallpaper || 
+    property bool showSpinner: window.isDownloadingWallpaper ||
+                               window.isSearchingOnline ||
                                (window.currentFilter !== "Search" && window.isLoading)
 
     property string currentNotification: {
-        if (window.isDownloadingWallpaper) return "Downloading wallpaper...";
+        if (window.isDownloadingWallpaper)
+            return "Downloading wallpaper...";
 
         if (window.currentFilter === "Search") {
-            if (!window.hasSearched) return "Type to search local wallpapers...";
-            if (window.visibleItemCount === 0) return "No local matches";
-            return "Local search";
+            if (window.isSearchingOnline)
+                return "Searching Wallhaven...";
+
+            if (window.onlineSearchError !== "")
+                return window.onlineSearchError;
+
+            if (!window.hasSearched)
+                return "Type to search local wallpapers...";
+
+            if (window.visibleItemCount === 0 && !window.isOnlineSearch)
+                return "No local matches";
+
+            if (window.visibleItemCount === 0)
+                return "No online matches";
+
+            return window.isOnlineSearch
+                ? "Online results"
+                : "Local search";
         }
 
         if (isLoading) return "Generating thumbnails...";
@@ -532,6 +551,10 @@ Item {
         window.updateVisibleCount();
         window.applyFilters(true);
 
+        if (window.visibleItemCount === 0) {
+            window.triggerOnlineSearch(window.searchQuery);
+        }
+
         searchInput.focus = false;
         view.forceActiveFocus();
     }
@@ -618,7 +641,22 @@ Item {
     }
 
     function checkItemMatchesFilter(fileName, isVid, cv, filter) {
-        if (filter === "Search") return false;
+        if (filter === "Search" && window.isOnlineSearch) {
+            return true;
+        }
+
+        const cleanName =
+            window.getCleanName(fileName).toLowerCase();
+        const query =
+            (window.searchQuery || "").trim().toLowerCase();
+
+        if (filter === "Search") {
+            return query === "" || cleanName.includes(query);
+        }
+
+        if (filter === "All") {
+            return true;
+        }
 
         if (filter === "Video") {
             return isVid;
@@ -628,12 +666,13 @@ Item {
             return false;
         }
 
-        if (filter === "All") {
-            return true;
+        const hexColor = window.colorMap[String(fileName)];
+
+        if (!hexColor) {
+            return filter === "Monochrome";
         }
 
-        const cleanName = window.getCleanName(fileName).toLowerCase();
-        return cleanName.includes(filter.toLowerCase());
+        return window.getHexBucket(hexColor) === filter;
     }
 
     FolderListModel {
@@ -659,6 +698,110 @@ Item {
                 window.isDownloadingWallpaper = false;
             }
         }
+    }
+
+
+    Process {
+        id: onlineSearchProcess
+
+        stdout: StdioCollector {
+            onStreamFinished: {
+                window.applyOnlineResults(this.text)
+            }
+        }
+
+        onExited: (exitCode, exitStatus) => {
+            if (exitCode !== 0) {
+                window.isSearchingOnline = false
+                window.isOnlineSearch = false
+                window.onlineSearchError = "Online search failed"
+
+                localProxyModel.clear()
+                window.syncLocalModel()
+                window.updateVisibleCount()
+            }
+        }
+    }
+
+    function triggerOnlineSearch(query) {
+        const normalized = String(query || "").trim()
+
+        if (normalized === "" || onlineSearchProcess.running) {
+            return
+        }
+
+        window.isOnlineSearch = true
+        window.isSearchingOnline = true
+        window.onlineSearchError = ""
+
+        let scriptPath =
+            Qt.resolvedUrl("scripts/online_search.sh").toString()
+
+        if (scriptPath.startsWith("file://")) {
+            scriptPath =
+                decodeURIComponent(scriptPath.substring(7))
+        }
+
+        onlineSearchProcess.command = [
+            "bash",
+            scriptPath,
+            normalized
+        ]
+
+        onlineSearchProcess.running = true
+    }
+
+    function applyOnlineResults(text) {
+        window.isModelChanging = true
+        localProxyModel.clear()
+
+        const resultLines = String(text || "")
+            .split("\n")
+            .filter(line => line.trim() !== "")
+
+        for (let i = 0; i < resultLines.length; i++) {
+            const separator = resultLines[i].indexOf("|")
+
+            if (separator <= 0) {
+                continue
+            }
+
+            const fileName =
+                resultLines[i].substring(0, separator).trim()
+
+            if (fileName === "") {
+                continue
+            }
+
+            const thumbnail =
+                decodeURIComponent(
+                    window.searchDir.replace("file://", "")
+                )
+                + "/"
+                + fileName
+
+            localProxyModel.append({
+                fileName: fileName,
+                fileUrl: "file://" + thumbnail
+            })
+        }
+
+        window.isSearchingOnline = false
+        window.isOnlineSearch = true
+        window.onlineSearchError = ""
+        window.hasSearched = true
+        window.searchIndexRestored = true
+
+        if (localProxyModel.count > 0) {
+            view.currentIndex = 0
+            view.positionViewAtIndex(0, ListView.Center)
+        } else {
+            view.currentIndex = -1
+        }
+
+        window.updateVisibleCount()
+        window.isModelChanging = false
+        view.forceActiveFocus()
     }
 
     function processMarkers() {
@@ -855,14 +998,14 @@ Item {
         }
         
         Qt.callLater(() => {
-            view.forceActiveFocus();
-
             if (window.currentFilter === "Search") {
+                searchInput.forceActiveFocus()
                 if (window.hasSearched) {
                     window.searchIndexRestored = false; 
                     window.trySearchFocus();
                 }
             } else {
+                view.forceActiveFocus()
                 window.applyFilters(returningFromSearch);
             }
             window.isModelChanging = false;
@@ -1446,7 +1589,7 @@ Item {
                         if (window.currentFilter !== "Search") {
                             window.currentFilter = "Search"
                         } else {
-                            window.currentFilter = "All" 
+                            searchInput.forceActiveFocus()
                         }
                     }
                 }
@@ -1497,6 +1640,18 @@ Item {
                     clip: true
                     
                     onTextEdited: {
+                        if (window.isSearchingOnline) {
+                            onlineSearchProcess.running = false
+                            window.isSearchingOnline = false
+                        }
+
+                        if (window.isOnlineSearch) {
+                            window.isOnlineSearch = false
+                            localProxyModel.clear()
+                            window.syncLocalModel()
+                        }
+
+                        window.onlineSearchError = ""
                         window.searchQuery = text.trim().toLowerCase()
 
                         window.currentFilter = "Search"
