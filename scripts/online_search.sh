@@ -12,4 +12,4 @@ if ! command -v python3 >/dev/null 2>&1; then
     exit 3
 fi
 
-exec python3 "$SCRIPT_DIR/wallpaper_search.py" "$@"
+exec python3 "$SCRIPT_DIR/preview_pipeline.py" "$@"
