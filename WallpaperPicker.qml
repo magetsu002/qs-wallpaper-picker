@@ -258,10 +258,13 @@ Item {
             return;
         }
 
-        const realFileName = isVideo
-            ? String(safeFileName).replace(/^000_/, "").replace(/\.(jpg|jpeg|png|webp)$/i, ".mp4")
-            : String(safeFileName).replace(/^thumb_/, "")
-        const originalFile = window.srcDir + "/" + realFileName
+        const realFileName =
+            window.getSourceFileName(
+                safeFileName,
+                isVideo
+            )
+        const originalFile =
+            window.srcDir + "/" + realFileName
         const thumbFile = Quickshell.env("HOME") + "/.cache/wallpaper_picker/thumbs/" + safeFileName 
         
         let wallpaperCmd = ""
@@ -271,7 +274,10 @@ Item {
         const escThumb = escapeBash(thumbFile);
         const escReload = escapeBash(reloadScript);
         const lastType = isVideo ? "video" : "image";
-        const escRealFileName = escapeBash(realFileName);
+        const ml4wMode = escapeBash(
+            Quickshell.env("QS_WALLPAPER_ENABLE_ML4W")
+            || "auto"
+        );
 
         if (isVideo) {
             wallpaperCmd = `
@@ -300,15 +306,32 @@ Item {
                 export THUMB_FILE="${escThumb}"
                 export RELOAD_SCRIPT="${escReload}"
 
-                echo "${lastType}|${escRealFileName}" > "$HOME/.cache/wallpaper_picker/last_wallpaper"
+                mkdir -p "$HOME/.cache/wallpaper_picker"
+                printf '%s|%s\n' "${lastType}" "$WALL_FILE" > "$HOME/.cache/wallpaper_picker/last_wallpaper"
 
-                # Sync ML4W/Rofi wallpaper background async
+                # Optional ML4W/Rofi synchronization.
                 (
+                    ML4W_MODE="${ml4wMode}"
                     ML4W="$HOME/.cache/ml4w/hyprland-dotfiles"
-                    mkdir -p "$ML4W"
-                    echo "$WALL_FILE" > "$ML4W/current_wallpaper"
-                    magick "$WALL_FILE" -resize 2048x1280^ -gravity center -extent 2048x1280 -blur 0x18 "$ML4W/blurred_wallpaper.png" 2>/dev/null || true
-                    echo '* { current-image: url("'"$ML4W"'/blurred_wallpaper.png", height); }' > "$ML4W/current_wallpaper.rasi"
+
+                    if [ "$ML4W_MODE" = "1" ] ||
+                       { [ "$ML4W_MODE" = "auto" ] && [ -d "$ML4W" ]; }
+                    then
+                        ML4W_SOURCE="$WALL_FILE"
+
+                        if [ "${isVideo}" = "true" ]; then
+                            ML4W_SOURCE="$THUMB_FILE"
+                        fi
+
+                        mkdir -p "$ML4W"
+                        printf '%s\n' "$WALL_FILE" > "$ML4W/current_wallpaper"
+
+                        if command -v magick >/dev/null 2>&1; then
+                            magick "$ML4W_SOURCE" -resize 2048x1280^ -gravity center -extent 2048x1280 -blur 0x18 "$ML4W/blurred_wallpaper.png" 2>/dev/null || true
+                        fi
+
+                        printf '%s\n' '* { current-image: url("'"$ML4W"'/blurred_wallpaper.png", height); }' > "$ML4W/current_wallpaper.rasi"
+                    fi
                 ) >/tmp/ml4w_rofi_wallpaper_sync.log 2>&1 &
                 echo "WALL_FILE=$WALL_FILE" > /tmp/qs_apply.log
                 ${lockBgCmd} || true
@@ -405,6 +428,36 @@ Item {
         if (!name) return "";
         let clean = String(name);
         return clean.startsWith("000_") ? clean.substring(4) : clean;
+    }
+
+    function getSourceFileName(name, isVideo) {
+        let clean = String(name || "");
+
+        if (!isVideo) {
+            return clean.replace(/^thumb_/, "");
+        }
+
+        let encoded = clean
+            .replace(/^000_/, "")
+            .replace(/\.jpg$/i, "");
+
+        for (let i = 0; i < srcModel.count; i++) {
+            let candidate =
+                srcModel.get(i, "fileName") || "";
+
+            if (candidate === encoded) {
+                return candidate;
+            }
+
+            let stem =
+                candidate.replace(/\.[^.]+$/, "");
+
+            if (stem === encoded) {
+                return candidate;
+            }
+        }
+
+        return encoded;
     }
 
     function importWallpaper(fileUrl) {
@@ -1304,7 +1357,13 @@ Item {
                     
                     MediaPlayer {
                         id: previewPlayer
-                        source: delegateRoot.isPlayingVideo ? "file://" + window.srcDir + "/" + window.getCleanName(delegateRoot.safeFileName) : ""
+                        source: delegateRoot.isPlayingVideo
+                            ? "file://" + window.srcDir + "/" +
+                              window.getSourceFileName(
+                                  delegateRoot.safeFileName,
+                                  true
+                              )
+                            : ""
                         audioOutput: AudioOutput { muted: true }
                         videoOutput: previewOutput
                         loops: MediaPlayer.Infinite

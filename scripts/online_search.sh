@@ -3,10 +3,23 @@
 set -u
 
 QUERY="${1:-}"
-CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/wallpaper_picker"
+CACHE_DIR="$HOME/.cache/wallpaper_picker"
 THUMB_DIR="$CACHE_DIR/search_thumbs"
 MAP_FILE="$CACHE_DIR/search_map.txt"
 JOBS="${QS_WALLPAPER_SEARCH_JOBS:-6}"
+LIMIT="${QS_WALLPAPER_SEARCH_LIMIT:-24}"
+
+if ! [[ "$JOBS" =~ ^[1-9][0-9]*$ ]]; then
+    echo "QS_WALLPAPER_SEARCH_JOBS must be a positive integer." >&2
+    exit 2
+fi
+
+if ! [[ "$LIMIT" =~ ^[1-9][0-9]*$ ]] ||
+   (( LIMIT > 24 ))
+then
+    echo "QS_WALLPAPER_SEARCH_LIMIT must be between 1 and 24." >&2
+    exit 2
+fi
 
 if [[ -z "${QUERY//[[:space:]]/}" ]]; then
     echo "Search query is empty." >&2
@@ -50,21 +63,23 @@ curl \
     --connect-timeout 8 \
     --max-time 30 \
     --user-agent "qs-wallpaper-picker/2.0" \
-    "https://wallhaven.cc/api/v1/search?q=${ENCODED}&purity=100&sorting=relevance&per_page=24" \
+    "https://wallhaven.cc/api/v1/search?q=${ENCODED}&purity=100&sorting=relevance&per_page=${LIMIT}" \
     --output "$RESPONSE" ||
 {
     echo "Wallhaven request failed." >&2
     exit 5
 }
 
-python3 - "$RESPONSE" >"$RESULTS" <<'PYPARSE'
+python3 - "$RESPONSE" "$LIMIT" >"$RESULTS" <<'PYPARSE'
 import json
 import sys
 
 with open(sys.argv[1], encoding="utf-8") as handle:
     payload = json.load(handle)
 
-for item in payload.get("data", []):
+limit = int(sys.argv[2])
+
+for item in payload.get("data", [])[:limit]:
     wallpaper_id = str(item.get("id", "")).strip()
     full_url = str(item.get("path", "")).strip()
     thumbs = item.get("thumbs") or {}

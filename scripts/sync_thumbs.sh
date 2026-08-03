@@ -2,56 +2,99 @@
 
 set -u
 
-SRC="/home/magetsu/Wallpapers"
-THUMBS="/home/magetsu/.cache/wallpaper_picker/thumbs"
+SOURCE_DIR="${1:-${QS_WALLPAPER_DIR:-$HOME/Wallpapers}}"
+THUMB_DIR="$HOME/.cache/wallpaper_picker/thumbs"
 
-mkdir -p "$THUMBS"
+if [[ ! -d "$SOURCE_DIR" ]]; then
+    echo "Wallpaper directory does not exist: $SOURCE_DIR" >&2
+    exit 2
+fi
 
-find "$THUMBS" -maxdepth 1 -type f | while read -r thumb; do
-    base="$(basename "$thumb")"
+mkdir -p "$THUMB_DIR"
 
-    if [[ "$base" == 000_*.jpg ]]; then
-        name="${base#000_}"
-        name="${name%.jpg}"
+EXPECTED="$(mktemp)"
+trap 'rm -f "$EXPECTED"' EXIT
 
-        found=0
-        for ext in mp4 mkv mov webm; do
-            if [ -f "$SRC/$name.$ext" ]; then
-                found=1
-                break
+while IFS= read -r -d '' source; do
+    name="$(basename "$source")"
+    extension="${name##*.}"
+    extension="${extension,,}"
+
+    case "$extension" in
+        mp4|mkv|mov|webm)
+            thumbnail_name="000_${name}.jpg"
+            destination="$THUMB_DIR/$thumbnail_name"
+
+            printf '%s\n' "$thumbnail_name" >>"$EXPECTED"
+
+            if [[ -f "$destination" &&
+                  "$destination" -nt "$source" ]]
+            then
+                continue
             fi
-        done
 
-        [ "$found" -eq 1 ] || rm -f "$thumb"
-    else
-        [ -f "$SRC/$base" ] || rm -f "$thumb"
-    fi
-done
+            if command -v ffmpeg >/dev/null 2>&1; then
+                temporary="${destination}.tmp.jpg"
 
-find "$SRC" -maxdepth 1 -type f \
-  \( -iname '*.jpg' -o -iname '*.jpeg' -o -iname '*.png' -o -iname '*.webp' -o -iname '*.gif' -o -iname '*.mp4' -o -iname '*.mkv' -o -iname '*.mov' -o -iname '*.webm' \) |
-while read -r file; do
-    base="$(basename "$file")"
-    lower="${base,,}"
-
-    case "$lower" in
-        *.mp4|*.mkv|*.mov|*.webm)
-            name="${base%.*}"
-            thumb="$THUMBS/000_${name}.jpg"
-
-            if [ ! -f "$thumb" ] || [ "$file" -nt "$thumb" ]; then
-                ffmpeg -y -ss 1 -i "$file" \
-                    -frames:v 1 -update 1 -vf "scale=-2:420" \
-                    "$thumb" >/dev/null 2>&1
+                if ffmpeg \
+                    -y \
+                    -ss 00:00:01 \
+                    -i "$source" \
+                    -frames:v 1 \
+                    -vf 'scale=-2:720' \
+                    "$temporary" \
+                    >/dev/null 2>&1
+                then
+                    mv -f "$temporary" "$destination"
+                else
+                    rm -f "$temporary"
+                fi
             fi
             ;;
 
-        *.jpg|*.jpeg|*.png|*.webp|*.gif)
-            thumb="$THUMBS/$base"
+        jpg|jpeg|png|webp|gif)
+            thumbnail_name="$name"
+            destination="$THUMB_DIR/$thumbnail_name"
+            temporary="${destination}.tmp.${extension}"
 
-            if [ ! -f "$thumb" ] || [ "$file" -nt "$thumb" ]; then
-                magick "$file" -resize x420 -quality 70 "$thumb"
+            printf '%s\n' "$thumbnail_name" >>"$EXPECTED"
+
+            if [[ -f "$destination" &&
+                  "$destination" -nt "$source" ]]
+            then
+                continue
+            fi
+
+            if command -v magick >/dev/null 2>&1; then
+                if magick \
+                    "$source" \
+                    -auto-orient \
+                    -thumbnail '1280x720>' \
+                    "$temporary"
+                then
+                    mv -f "$temporary" "$destination"
+                else
+                    rm -f "$temporary"
+                fi
             fi
             ;;
     esac
-done
+done < <(
+    find "$SOURCE_DIR" \
+        -maxdepth 1 \
+        -type f \
+        -print0
+)
+
+while IFS= read -r -d '' thumbnail; do
+    name="$(basename "$thumbnail")"
+
+    if ! grep -Fqx -- "$name" "$EXPECTED"; then
+        rm -f "$thumbnail"
+    fi
+done < <(
+    find "$THUMB_DIR" \
+        -maxdepth 1 \
+        -type f \
+        -print0
+)

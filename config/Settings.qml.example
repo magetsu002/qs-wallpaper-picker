@@ -4,9 +4,12 @@ import Quickshell
 QtObject {
     readonly property string homeDir: Quickshell.env("HOME")
 
-    property string wallpaperDir: "/home/YOUR_USERNAME/Wallpapers/Wallpapers"
-    readonly property string cacheDir: "/home/YOUR_USERNAME/.cache/wallpaper_picker"
-    readonly property string thumbDir: "/home/YOUR_USERNAME/.cache/wallpaper_picker/thumbs"
+    property string wallpaperDir:
+        homeDir + "/Wallpapers"
+    readonly property string cacheDir:
+        homeDir + "/.cache/wallpaper_picker"
+    readonly property string thumbDir:
+        cacheDir + "/thumbs"
 
     property bool uiAnimationsEnabled: true
     property real uiAnimationScale: 1.0
@@ -29,10 +32,14 @@ QtObject {
     property bool enableSwayncReload: true
     property bool enableSwayosdReload: true
 
-    property string hyprColorsPath: "/home/YOUR_USERNAME/.config/hypr/colors.conf"
-    property string waybarColorsPath: "/home/YOUR_USERNAME/.config/waybar/colors.css"
-    property string waybarLaunchPath: "/home/YOUR_USERNAME/.config/waybar/launch.sh"
-    property string kittySignalProcess: ".kitty-wrapped"
+    property string hyprColorsPath:
+        homeDir + "/.config/hypr/colors.conf"
+    property string waybarColorsPath:
+        homeDir + "/.config/waybar/colors.css"
+    property string waybarLaunchPath:
+        homeDir + "/.config/waybar/launch.sh"
+    property string kittySignalProcess:
+        ".kitty-wrapped"
 
     property string extraReloadCommand: ""
 }
