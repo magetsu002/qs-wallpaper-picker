@@ -127,15 +127,20 @@ jobs:
           grep -Fq 'QS_WALLPAPER_ENABLE_ML4W:-0' scripts/restore_wallpaper.sh
           grep -Fq 'ENABLE_MATUGEN="${ENABLE_MATUGEN:-0}"' scripts/matugen_reload.sh
 
-      - name: Verify README links, dependencies and credits
+      - name: Verify README links, preview, dependencies and credits
         shell: bash
         run: |
           set -euo pipefail
           python - <<'PY'
-          import re
+          from html.parser import HTMLParser
           from pathlib import Path
+          import re
 
           readme = Path('README.md').read_text(encoding='utf-8')
+
+          if not readme.startswith('# QS Wallpaper Picker\n'):
+              raise SystemExit('README must begin with the product heading.')
+
           for target in re.findall(r'\[[^\]]+\]\(([^)]+)\)', readme):
               if '://' in target or target.startswith('#'):
                   continue
@@ -143,16 +148,100 @@ jobs:
               if path and not Path(path).exists():
                   raise SystemExit(f'Broken tracked README link: {target}')
 
-          required = (
-              'ImageMagick', 'ffmpeg', 'mpvpaper',
-              'Magetsu', 'ilyamiro', 'bay0n',
-              'docs/online-discovery.md',
-              'No local wallpapers appear',
-              'Download failed',
+          class PreviewParser(HTMLParser):
+              def __init__(self):
+                  super().__init__()
+                  self.center_depth = 0
+                  self.center_blocks = 0
+                  self.preview_images = []
+                  self.unbalanced = False
+
+              def handle_starttag(self, tag, attrs):
+                  values = dict(attrs)
+                  if tag == 'p' and values.get('align', '').lower() == 'center':
+                      self.center_depth += 1
+                      self.center_blocks += 1
+                  elif tag == 'p' and self.center_depth:
+                      self.center_depth += 1
+                  if tag == 'img' and self.center_depth:
+                      self.preview_images.append(values)
+
+              def handle_startendtag(self, tag, attrs):
+                  if tag == 'img' and self.center_depth:
+                      self.preview_images.append(dict(attrs))
+
+              def handle_endtag(self, tag):
+                  if tag == 'p':
+                      if self.center_depth == 0:
+                          self.unbalanced = True
+                      else:
+                          self.center_depth -= 1
+
+          parser = PreviewParser()
+          parser.feed(readme)
+          if parser.unbalanced or parser.center_depth != 0:
+              raise SystemExit('README preview HTML is unbalanced.')
+          if parser.center_blocks != 1 or len(parser.preview_images) != 1:
+              raise SystemExit('README must contain one centered preview image.')
+
+          preview = parser.preview_images[0]
+          approved_url = (
+              'https://github.com/user-attachments/assets/'
+              'd14fce0d-4ef9-4cca-8c41-94e4ffd893bd'
           )
-          missing = [item for item in required if item not in readme]
+          if preview.get('src') != approved_url:
+              raise SystemExit('README preview does not use the approved image URL.')
+          alt = preview.get('alt', '').strip()
+          if len(alt) < 12 or 'wallpaper' not in alt.lower():
+              raise SystemExit('README preview needs meaningful alt text.')
+          if 'add the final picker screenshot' in readme.lower():
+              raise SystemExit('Obsolete pending-screenshot placeholder remains.')
+
+          headings = (
+              '## Quick start',
+              '## Local and online search',
+              '## Requirements',
+              '## Configuration',
+              '## Troubleshooting',
+              '## Advanced documentation',
+              '## Privacy',
+              '## Credits',
+              '## License',
+          )
+          missing_headings = [heading for heading in headings if heading not in readme]
+          if missing_headings:
+              raise SystemExit(f'Missing README headings: {missing_headings}')
+
+          exact_contract = (
+              'cp config/Settings.qml.example config/Settings.qml',
+              './scripts/open_picker.sh',
+              '](docs/online-discovery.md)',
+          )
+          absent = [item for item in exact_contract if item not in readme]
+          if absent:
+              raise SystemExit(f'Missing README setup/link contract: {absent}')
+
+          semantic_patterns = {
+              'local filename search': r'typ(?:e|ing).*local.*wallpaper.*filename',
+              'Enter-triggered Wallhaven search': r'enter.*search(?:es|ing)?.*wallhaven',
+              'ImageMagick dependency': r'imagemagick',
+              'ffmpeg dependency': r'ffmpeg',
+              'mpvpaper dependency': r'mpvpaper',
+              'Python 3.12 certification': r'python\s+3\.12.*certified by ci',
+              'Magetsu ownership': r'created and maintained by\s+\*\*magetsu\*\*',
+              'ilyamiro interface attribution': r'interface.*adapted.*ilyamiro|ilyamiro.*interface',
+              'contributor recognition': r'bay0n|contributors?|git history',
+              'privacy behavior': r'local wallpaper filenames.*not transmitted',
+              'configuration behavior': r'qs_wallpaper_dir',
+              'local-wallpaper troubleshooting': r'no local wallpapers appear',
+              'download-failure troubleshooting': r'failed downloads?|fails? to download',
+          }
+          missing = [
+              name for name, pattern in semantic_patterns.items()
+              if not re.search(pattern, readme, re.IGNORECASE | re.DOTALL)
+          ]
           if missing:
-              raise SystemExit(f'Missing README contract text: {missing}')
+              raise SystemExit(f'Missing README semantic contracts: {missing}')
           PY
 
       - name: Verify advanced architecture and troubleshooting
