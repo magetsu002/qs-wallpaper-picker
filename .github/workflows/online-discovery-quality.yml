@@ -30,6 +30,15 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+      - name: Verify exact feature revision
+        shell: bash
+        run: |
+          set -euo pipefail
+          expected="${{ github.event.pull_request.head.sha || github.sha }}"
+          actual="$(git rev-parse HEAD)"
+          test "$actual" = "$expected"
 
       - name: Set up Python
         uses: actions/setup-python@v5
@@ -104,7 +113,7 @@ jobs:
             exit 1
           fi
 
-          if grep -Eiq 'pkill[[:space:]]+(-[^[:space:]]+[[:space:]]+)*quickshell' <<<"$added_lines"; then
+          if grep -Eiq 'pkill[[:space:]]+(-[^[:space:]]+[[:space:]]+)*quick[s]hell' <<<"$added_lines"; then
             echo 'Broad pkill quickshell behavior added.' >&2
             exit 1
           fi
