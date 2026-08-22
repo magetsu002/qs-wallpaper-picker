@@ -26,11 +26,9 @@ export QS_WALLPAPER_ENABLE_ML4W="${QS_WALLPAPER_ENABLE_ML4W:-0}"
 "$SCRIPT_DIR/sync_thumbs.sh" "$WALLPAPER_DIR"
 
 if command -v flock >/dev/null 2>&1; then
-    exec 9>"$STATE_DIR/picker.lock"
-
-    if ! flock -n 9; then
-        exit 0
-    fi
+    exec flock -n -o \
+        "$STATE_DIR/picker.lock" \
+        quickshell -p "$PROJECT_DIR/Main.qml"
 fi
 
 exec quickshell -p "$PROJECT_DIR/Main.qml"
