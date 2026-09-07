@@ -102,9 +102,34 @@ Item {
     property string currentDownloadName: ""
     property string pendingOnlineDownloadName: ""
     property string pendingOnlineDownloadDestination: ""
+    property string actionMessage: ""
     
     // STRICT ARCHITECTURAL LOCK
     property bool isApplying: false 
+
+    Timer {
+        id: actionMessageTimer
+        interval: 2200
+        onTriggered: window.actionMessage = ""
+    }
+
+    function requestWallpaperDelete(safeFileName, isVideo) {
+        if (!safeFileName || window.isOnlineSearch || trashWallpaperProcess.running)
+            return
+
+        const sourceFileName = window.getSourceFileName(safeFileName, isVideo)
+        if (!sourceFileName)
+            return
+
+        window.actionMessage = "Moving wallpaper to Trash..."
+        trashWallpaperProcess.command = [
+            "bash",
+            window.resolveProjectScript("scripts/trash_wallpaper.sh"),
+            window.srcDir,
+            sourceFileName
+        ]
+        trashWallpaperProcess.running = true
+    }
     
     // Reactive Status Properties
     property bool isStartup: localFolderModel.status === FolderListModel.Loading || srcModel.status === FolderListModel.Loading
@@ -402,6 +427,9 @@ Item {
                                (window.currentFilter !== "Search" && window.isLoading)
 
     property string currentNotification: {
+        if (window.actionMessage !== "")
+            return window.actionMessage;
+
         if (window.isDownloadingWallpaper)
             return "Downloading wallpaper...";
 
@@ -781,6 +809,24 @@ Item {
 
             window.isApplying = false
             window.onlineSearchError = "Download failed"
+            view.forceActiveFocus()
+        }
+    }
+
+    Process {
+        id: trashWallpaperProcess
+
+        onExited: (exitCode) => {
+            if (exitCode === 0) {
+                window.actionMessage = "Wallpaper moved to Trash"
+                window.targetWallName = ""
+                window.reloadFolder()
+            } else if (exitCode === 3) {
+                window.actionMessage = "Switch wallpapers before deleting the active one"
+            } else {
+                window.actionMessage = "Could not move wallpaper to Trash"
+            }
+            actionMessageTimer.restart()
             view.forceActiveFocus()
         }
     }
@@ -1343,6 +1389,11 @@ Item {
                     property real s: window.skewFactor
                     matrix: Qt.matrix4x4(1, s, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)
                 }
+
+                HoverHandler {
+                    id: wallpaperHover
+                    enabled: delegateRoot.matchesFilter && !window.isScrollingBlocked
+                }
                 
                 MouseArea {
                     anchors.fill: parent
@@ -1353,6 +1404,68 @@ Item {
                         clickPulseReset.start()
                         view.currentIndex = index
                         window.applyWallpaper(delegateRoot.safeFileName, delegateRoot.isVideo)
+                    }
+                }
+
+                Rectangle {
+                    id: deleteButton
+                    z: 20
+                    anchors.top: parent.top
+                    anchors.right: parent.right
+                    anchors.margins: window.s(14)
+                    width: window.s(34)
+                    height: width
+                    radius: width / 2
+                    visible: wallpaperHover.hovered && !window.isOnlineSearch
+                    opacity: trashWallpaperProcess.running ? 0.45 : 1
+                    color: deleteHover.containsMouse ? "#D94452" : "#990E1118"
+                    border.width: 1
+                    border.color: deleteHover.containsMouse ? "#F7A7AE" : "#66FFFFFF"
+
+                    transform: Matrix4x4 {
+                        property real s: -window.skewFactor
+                        matrix: Qt.matrix4x4(1, s, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)
+                    }
+
+                    Behavior on color { ColorAnimation { duration: window.anim(100) } }
+
+                    Canvas {
+                        anchors.centerIn: parent
+                        width: window.s(16)
+                        height: window.s(16)
+                        onPaint: {
+                            const ctx = getContext("2d")
+                            ctx.reset()
+                            ctx.strokeStyle = "#F4F5F8"
+                            ctx.lineWidth = Math.max(1.4, window.s(1.5))
+                            ctx.lineCap = "round"
+                            ctx.lineJoin = "round"
+                            ctx.beginPath()
+                            ctx.moveTo(width * 0.22, height * 0.30)
+                            ctx.lineTo(width * 0.78, height * 0.30)
+                            ctx.moveTo(width * 0.39, height * 0.18)
+                            ctx.lineTo(width * 0.61, height * 0.18)
+                            ctx.moveTo(width * 0.29, height * 0.35)
+                            ctx.lineTo(width * 0.35, height * 0.82)
+                            ctx.lineTo(width * 0.65, height * 0.82)
+                            ctx.lineTo(width * 0.71, height * 0.35)
+                            ctx.stroke()
+                        }
+                    }
+
+                    MouseArea {
+                        id: deleteHover
+                        anchors.fill: parent
+                        enabled: !window.isApplying && !trashWallpaperProcess.running
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: function(mouse) {
+                            mouse.accepted = true
+                            window.requestWallpaperDelete(
+                                delegateRoot.safeFileName,
+                                delegateRoot.isVideo
+                            )
+                        }
                     }
                 }
 
