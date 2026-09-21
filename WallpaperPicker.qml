@@ -92,6 +92,10 @@ Item {
     property bool isOnlineSearch: false
     property bool isSearchingOnline: false
     property string onlineSearchError: ""
+    property int onlineSearchEpoch: 0
+    property int activeOnlineSearchEpoch: 0
+    property string pendingOnlineSearchQuery: ""
+    property bool onlineSearchStartedFromPublishedResults: false
     property bool isSearchPaused: false
     property bool hasSearched: false 
     property var colorMap: ({})
@@ -102,9 +106,34 @@ Item {
     property string currentDownloadName: ""
     property string pendingOnlineDownloadName: ""
     property string pendingOnlineDownloadDestination: ""
+    property string actionMessage: ""
     
     // STRICT ARCHITECTURAL LOCK
     property bool isApplying: false 
+
+    Timer {
+        id: actionMessageTimer
+        interval: 2200
+        onTriggered: window.actionMessage = ""
+    }
+
+    function requestWallpaperDelete(safeFileName, isVideo) {
+        if (!safeFileName || window.isOnlineSearch || trashWallpaperProcess.running)
+            return
+
+        const sourceFileName = window.getSourceFileName(safeFileName, isVideo)
+        if (!sourceFileName)
+            return
+
+        window.actionMessage = "Moving wallpaper to Trash..."
+        trashWallpaperProcess.command = [
+            "bash",
+            window.resolveProjectScript("scripts/trash_wallpaper.sh"),
+            window.srcDir,
+            sourceFileName
+        ]
+        trashWallpaperProcess.running = true
+    }
     
     // Reactive Status Properties
     property bool isStartup: localFolderModel.status === FolderListModel.Loading || srcModel.status === FolderListModel.Loading
@@ -402,6 +431,9 @@ Item {
                                (window.currentFilter !== "Search" && window.isLoading)
 
     property string currentNotification: {
+        if (window.actionMessage !== "")
+            return window.actionMessage;
+
         if (window.isDownloadingWallpaper)
             return "Downloading wallpaper...";
 
@@ -593,37 +625,23 @@ Item {
         window.visibleItemCount = count;
     }
 
-    function triggerLocalSearch() {
-        if (searchInput.text.trim() === "") return;
+    function submitOnlineSearch() {
+        const normalized = String(window.searchQuery || "").trim().toLowerCase()
+        if (normalized === "") return
 
-        window.isModelChanging = true;
+        window.lastSearchName = ""
+        searchState.lastName = ""
+        window.currentFilter = "Search"
+        window.searchIndexRestored = true
+        window.hasSearched = true
+        window.isSearchPaused = true
+        window.searchQuery = normalized
+        searchState.searched = true
+        searchState.query = normalized
 
-        window.lastSearchName = "";
-        searchState.lastName = "";
-
-        window.currentFilter = "Search";
-        window.searchIndexRestored = true;
-        window.isOnlineSearch = false;
-        window.hasSearched = true;
-        window.isSearchPaused = true;
-        window.searchQuery = searchInput.text.trim().toLowerCase();
-        searchState.searched = true;
-        searchState.query = window.searchQuery;
-
-        view.currentIndex = 0;
-        view.positionViewAtIndex(0, ListView.Center);
-
-        window.isModelChanging = false;
-
-        window.updateVisibleCount();
-        window.applyFilters(true);
-
-        if (window.visibleItemCount === 0) {
-            window.triggerOnlineSearch(window.searchQuery);
-        }
-
-        searchInput.focus = false;
-        view.forceActiveFocus();
+        window.triggerOnlineSearch(normalized)
+        searchInput.focus = false
+        view.forceActiveFocus()
     }
 
     readonly property string homeDir: "file://" + Quickshell.env("HOME")
@@ -786,52 +804,151 @@ Item {
     }
 
     Process {
-        id: onlineSearchProcess
+        id: trashWallpaperProcess
 
-        stdout: StdioCollector {
-            onStreamFinished: {
-                window.applyOnlineResults(this.text)
+        onExited: (exitCode) => {
+            if (exitCode === 0) {
+                window.actionMessage = "Wallpaper moved to Trash"
+                window.targetWallName = ""
+                window.reloadFolder()
+            } else if (exitCode === 3) {
+                window.actionMessage = "Switch wallpapers before deleting the active one"
+            } else {
+                window.actionMessage = "Could not move wallpaper to Trash"
             }
-        }
-
-        onExited: (exitCode, exitStatus) => {
-            if (exitCode !== 0) {
-                window.isSearchingOnline = false
-                window.isOnlineSearch = false
-                window.onlineSearchError = "Online search failed"
-
-                localProxyModel.clear()
-                window.syncLocalModel()
-                window.updateVisibleCount()
-            }
+            actionMessageTimer.restart()
+            view.forceActiveFocus()
         }
     }
 
-    function triggerOnlineSearch(query) {
-        const normalized = String(query || "").trim()
+    Process {
+        id: onlineSearchProcess
 
-        if (normalized === "" || onlineSearchProcess.running) {
-            return
+        stdout: StdioCollector {
+            id: onlineSearchStdout
         }
 
-        window.isOnlineSearch = true
-        window.isSearchingOnline = true
-        window.onlineSearchError = ""
+        stderr: StdioCollector {
+            id: onlineSearchStderr
+        }
 
+        onExited: (exitCode, exitStatus) => {
+            if (window.activeOnlineSearchEpoch !== window.onlineSearchEpoch) {
+                if (window.pendingOnlineSearchQuery !== "") {
+                    const nextQuery = window.pendingOnlineSearchQuery
+                    window.pendingOnlineSearchQuery = ""
+                    Qt.callLater(() => window.triggerOnlineSearch(nextQuery))
+                }
+                return
+            }
+
+            window.isSearchingOnline = false
+
+            if (exitCode === 0) {
+                window.applyOnlineResults(onlineSearchStdout.text)
+                return
+            }
+
+            if (exitCode === 75) {
+                return
+            }
+
+            window.isOnlineSearch =
+                window.onlineSearchStartedFromPublishedResults
+            window.onlineSearchError =
+                window.onlineSearchErrorMessage(onlineSearchStderr.text)
+            window.updateVisibleCount()
+            view.forceActiveFocus()
+        }
+    }
+
+    function onlineSearchScriptPath() {
         let scriptPath =
             Qt.resolvedUrl("scripts/online_search.sh").toString()
-
         if (scriptPath.startsWith("file://")) {
             scriptPath =
                 decodeURIComponent(scriptPath.substring(7))
         }
+        return scriptPath
+    }
+
+    function cancelOnlineSearch() {
+        if (!window.isSearchingOnline && !onlineSearchProcess.running) {
+            return
+        }
+
+        if (onlineSearchProcess.running
+                && window.activeOnlineSearchEpoch !== window.onlineSearchEpoch) {
+            window.pendingOnlineSearchQuery = ""
+            window.isSearchingOnline = false
+            return
+        }
+
+        window.onlineSearchEpoch += 1
+        window.pendingOnlineSearchQuery = ""
+        Quickshell.execDetached([
+            "bash",
+            window.onlineSearchScriptPath(),
+            "--invalidate"
+        ])
+        window.isSearchingOnline = false
+    }
+
+    function onlineSearchErrorMessage(text) {
+        const lines = String(text || "").split("\n")
+        for (let i = 0; i < lines.length; i++) {
+            if (!lines[i].startsWith("MAHO_WALLPAPER_ERROR|")) {
+                continue
+            }
+            const parts = lines[i].split("|")
+            if (parts.length >= 3) {
+                return parts.slice(2).join("|").trim()
+            }
+        }
+
+        const lower = String(text || "").toLowerCase()
+        if (lower.includes("503") || lower.includes("service unavailable")) {
+            return "Wallpaper service temporarily unavailable"
+        }
+        if (lower.includes("429") || lower.includes("too many requests")) {
+            return "Wallpaper service temporarily unavailable"
+        }
+        if (lower.includes("timed out") || lower.includes("timeout")) {
+            return "Wallpaper service timed out"
+        }
+        if (lower.includes("name resolution") || lower.includes("network")) {
+            return "Network unavailable"
+        }
+        return "Online search failed"
+    }
+
+    function triggerOnlineSearch(query) {
+        const normalized = String(query || "").trim()
+        if (normalized === "") {
+            return
+        }
+
+        if (onlineSearchProcess.running) {
+            window.pendingOnlineSearchQuery = normalized
+            window.isSearchingOnline = true
+            window.onlineSearchError = ""
+            return
+        }
+
+        window.pendingOnlineSearchQuery = ""
+        window.onlineSearchStartedFromPublishedResults =
+            window.isOnlineSearch && localProxyModel.count > 0
+        window.onlineSearchEpoch += 1
+        window.activeOnlineSearchEpoch = window.onlineSearchEpoch
+        window.isOnlineSearch = true
+        window.isSearchingOnline = true
+        window.onlineSearchError = ""
 
         onlineSearchProcess.command = [
             "bash",
-            scriptPath,
+            window.onlineSearchScriptPath(),
             normalized
         ]
-
         onlineSearchProcess.running = true
     }
 
@@ -1343,6 +1460,11 @@ Item {
                     property real s: window.skewFactor
                     matrix: Qt.matrix4x4(1, s, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)
                 }
+
+                HoverHandler {
+                    id: wallpaperHover
+                    enabled: delegateRoot.matchesFilter && !window.isScrollingBlocked
+                }
                 
                 MouseArea {
                     anchors.fill: parent
@@ -1353,6 +1475,68 @@ Item {
                         clickPulseReset.start()
                         view.currentIndex = index
                         window.applyWallpaper(delegateRoot.safeFileName, delegateRoot.isVideo)
+                    }
+                }
+
+                Rectangle {
+                    id: deleteButton
+                    z: 20
+                    anchors.top: parent.top
+                    anchors.right: parent.right
+                    anchors.margins: window.s(14)
+                    width: window.s(34)
+                    height: width
+                    radius: width / 2
+                    visible: wallpaperHover.hovered && !window.isOnlineSearch
+                    opacity: trashWallpaperProcess.running ? 0.45 : 1
+                    color: deleteHover.containsMouse ? "#D94452" : "#990E1118"
+                    border.width: 1
+                    border.color: deleteHover.containsMouse ? "#F7A7AE" : "#66FFFFFF"
+
+                    transform: Matrix4x4 {
+                        property real s: -window.skewFactor
+                        matrix: Qt.matrix4x4(1, s, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)
+                    }
+
+                    Behavior on color { ColorAnimation { duration: window.anim(100) } }
+
+                    Canvas {
+                        anchors.centerIn: parent
+                        width: window.s(16)
+                        height: window.s(16)
+                        onPaint: {
+                            const ctx = getContext("2d")
+                            ctx.reset()
+                            ctx.strokeStyle = "#F4F5F8"
+                            ctx.lineWidth = Math.max(1.4, window.s(1.5))
+                            ctx.lineCap = "round"
+                            ctx.lineJoin = "round"
+                            ctx.beginPath()
+                            ctx.moveTo(width * 0.22, height * 0.30)
+                            ctx.lineTo(width * 0.78, height * 0.30)
+                            ctx.moveTo(width * 0.39, height * 0.18)
+                            ctx.lineTo(width * 0.61, height * 0.18)
+                            ctx.moveTo(width * 0.29, height * 0.35)
+                            ctx.lineTo(width * 0.35, height * 0.82)
+                            ctx.lineTo(width * 0.65, height * 0.82)
+                            ctx.lineTo(width * 0.71, height * 0.35)
+                            ctx.stroke()
+                        }
+                    }
+
+                    MouseArea {
+                        id: deleteHover
+                        anchors.fill: parent
+                        enabled: !window.isApplying && !trashWallpaperProcess.running
+                        hoverEnabled: true
+                        cursorShape: Qt.PointingHandCursor
+                        onClicked: function(mouse) {
+                            mouse.accepted = true
+                            window.requestWallpaperDelete(
+                                delegateRoot.safeFileName,
+                                delegateRoot.isVideo
+                            )
+                        }
                     }
                 }
 
@@ -1730,9 +1914,8 @@ Item {
                     clip: true
                     
                     onTextEdited: {
-                        if (window.isSearchingOnline) {
-                            onlineSearchProcess.running = false
-                            window.isSearchingOnline = false
+                        if (window.isSearchingOnline || onlineSearchProcess.running) {
+                            window.cancelOnlineSearch()
                         }
 
                         if (window.isOnlineSearch) {
@@ -1758,9 +1941,7 @@ Item {
                     }
                     
                     onAccepted: {
-                        window.triggerLocalSearch();
-                        searchInput.focus = false; 
-                        view.forceActiveFocus();
+                        window.submitOnlineSearch()
                     }
                 }
 

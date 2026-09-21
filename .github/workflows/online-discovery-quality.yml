@@ -78,7 +78,8 @@ jobs:
           set -euo pipefail
           grep -Fq 'preview_pipeline.py' scripts/online_search.sh
           grep -Fq 'Type to search locally • Press Enter to search online' Main.qml
-          grep -Fq 'triggerOnlineSearch(normalized)' Main.qml
+          grep -Fq 'onActivated: picker.submitOnlineSearch()' Main.qml
+          grep -Fq 'window.submitOnlineSearch()' WallpaperPicker.qml
           grep -Fq -- '--download' scripts/preview_pipeline.py
           grep -Fq 'download_full_wallpaper' scripts/preview_pipeline.py
           grep -Fq 'id: onlineDownloadProcess' WallpaperPicker.qml

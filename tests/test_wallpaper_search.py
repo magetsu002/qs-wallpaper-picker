@@ -197,18 +197,17 @@ class FoundationTests(unittest.TestCase):
 
             self.assertEqual(os.readlink(layout.current), original_target)
 
-    def test_main_qml_exposes_search_instruction_and_explicit_enter(self) -> None:
+    def test_main_qml_exposes_search_instruction_and_delegates_enter(self) -> None:
         main_qml = (ROOT / "Main.qml").read_text(encoding="utf-8")
         self.assertIn(
             "Type to search locally • Press Enter to search online",
             main_qml,
         )
         self.assertIn('sequence: "Return"', main_qml)
-        self.assertIn("picker.triggerOnlineSearch(normalized)", main_qml)
+        self.assertIn("picker.submitOnlineSearch()", main_qml)
         self.assertIn("ONLINE RESULTS", main_qml)
         self.assertIn("NO LOCAL RESULTS", main_qml)
         self.assertIn("ONLINE SEARCH FAILED", main_qml)
-        self.assertIn("--invalidate", main_qml)
 
 
 class ConfigurationAndRequestTests(unittest.TestCase):
