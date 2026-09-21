@@ -9,6 +9,7 @@ import sys
 import tempfile
 import unittest
 import urllib.error
+from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
@@ -295,6 +296,48 @@ class DiagnosticsPublicationTests(unittest.TestCase):
             self.assertTrue(all(event["provider"] == "wallhaven" for event in events))
             self.assertTrue(events[-1]["authoritative"])
             self.assertEqual(events[-1]["terminal_outcome"], "success")
+    def test_successful_newer_search_replaces_current_generation(self) -> None:
+        with tempfile.TemporaryDirectory() as temp:
+            env = base_env()
+            env.update({
+                "HOME": temp,
+                "XDG_CACHE_HOME": str(Path(temp) / "cache"),
+            })
+            layout = core.CacheLayout.from_environment(env)
+            first = make_candidate()
+            second = replace(
+                first,
+                wallpaper_id="def456",
+                full_url="https://w.wallhaven.cc/full/de/wallhaven-def456.jpg",
+                preview_url="https://th.wallhaven.cc/lg/de/def456.jpg",
+                file_name="wallhaven-def456.jpg",
+            )
+
+            ranked = iter(([first], [second]))
+            with mock.patch.object(core, "retrieve_payloads", return_value={"relevance": {"data": []}}), \
+                 mock.patch.object(core, "rank_payloads", side_effect=lambda *_: next(ranked)), \
+                 mock.patch.object(
+                     pipeline,
+                     "download_ranked_previews",
+                     side_effect=lambda candidates, *args, **kwargs: list(candidates),
+                 ):
+                pipeline.search("first query", env)
+                first_target = os.readlink(layout.current)
+                pipeline.search("second query", env)
+                second_target = os.readlink(layout.current)
+
+            self.assertNotEqual(first_target, second_target)
+            current = (layout.online / second_target).resolve()
+            self.assertEqual(
+                (current / "search_map.txt").read_text(encoding="utf-8"),
+                f"{second.file_name}|{second.full_url}\n",
+            )
+            manifest = json.loads(
+                (current / "manifest.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["query"], "second query")
+            self.assertEqual(manifest["results"][0]["id"], second.wallpaper_id)
+
     def test_provider_503_preserves_previous_generation_and_logs_failure(self) -> None:
         with tempfile.TemporaryDirectory() as temp:
             env = base_env()
