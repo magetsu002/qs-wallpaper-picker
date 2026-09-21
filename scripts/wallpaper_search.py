@@ -17,6 +17,8 @@ import math
 import os
 import re
 import shutil
+import socket
+import ssl
 import subprocess
 import sys
 import tempfile
@@ -26,7 +28,7 @@ import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Iterable, Mapping
+from typing import Any, Callable, Iterable, Mapping
 
 API_URL = "https://wallhaven.cc/api/v1/search"
 USER_AGENT = "qs-wallpaper-picker/3.0"
@@ -43,6 +45,7 @@ DEFAULT_MAX_RATIO_ERROR = 0.20
 MAX_RESULT_LIMIT = 24
 MAX_CANDIDATE_LIMIT = 72
 MAX_JOBS = 16
+DIAGNOSTIC_LOG_MAX_BYTES = 512 * 1024
 
 API_HOSTS = frozenset({"wallhaven.cc"})
 FULL_IMAGE_HOSTS = frozenset({"w.wallhaven.cc"})
@@ -68,7 +71,17 @@ STRATEGY_BASE_SCORE = {
 
 
 class SearchError(RuntimeError):
-    """User-facing online search failure."""
+    """Classified online-search failure."""
+
+    def __init__(self, message: str, *, code: str = "search_failed",
+                 user_message: str = "Online search failed",
+                 http_status: int | None = None,
+                 retryable: bool = False) -> None:
+        super().__init__(message)
+        self.code = code
+        self.user_message = user_message
+        self.http_status = http_status
+        self.retryable = retryable
 
 
 class CandidateRejected(SearchError):
@@ -102,6 +115,8 @@ class CacheLayout:
     current: Path
     lock: Path
     authority: Path
+    diagnostics: Path
+    diagnostics_lock: Path
     legacy_thumbs: Path
     legacy_map: Path
 
@@ -119,6 +134,8 @@ class CacheLayout:
             current=online / "current",
             lock=online / "publication.lock",
             authority=online / "authoritative_request",
+            diagnostics=online / "search-events.jsonl",
+            diagnostics_lock=online / "search-events.lock",
             legacy_thumbs=root / "search_thumbs",
             legacy_map=root / "search_map.txt",
         )
@@ -440,6 +457,38 @@ def publication_lock(layout: CacheLayout) -> Iterable[None]:
             fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
 
 
+def append_diagnostic(layout: CacheLayout, event: Mapping[str, Any]) -> None:
+    """Append one bounded JSONL lifecycle event without exposing payload bodies."""
+    layout.online.mkdir(parents=True, exist_ok=True)
+    record = {
+        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        **dict(event),
+    }
+    encoded = json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n"
+
+    with layout.diagnostics_lock.open("a+", encoding="utf-8") as lock_handle:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
+        try:
+            try:
+                size = layout.diagnostics.stat().st_size
+            except FileNotFoundError:
+                size = 0
+            if size >= DIAGNOSTIC_LOG_MAX_BYTES:
+                rotated = layout.diagnostics.with_suffix(".jsonl.1")
+                with contextlib.suppress(FileNotFoundError):
+                    rotated.unlink()
+                with contextlib.suppress(FileNotFoundError):
+                    os.replace(layout.diagnostics, rotated)
+            with layout.diagnostics.open("a", encoding="utf-8") as handle:
+                handle.write(encoded)
+        finally:
+            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
+
+
+def cli_error_line(exc: SearchError) -> str:
+    return f"MAHO_WALLPAPER_ERROR|{exc.code}|{exc.user_message}"
+
+
 def _read_request_id(path: Path) -> int:
     try:
         return int(path.read_text(encoding="utf-8").strip())
@@ -551,6 +600,60 @@ def _open_url(url: str, purpose: str, timeout: float):
     return response
 
 
+def _classify_provider_error(exc: BaseException) -> SearchError:
+    if isinstance(exc, urllib.error.HTTPError):
+        status = int(exc.code)
+        if status == 429:
+            return SearchError(
+                "Wallhaven returned HTTP 429.",
+                code="provider_rate_limited",
+                user_message="Wallpaper service temporarily unavailable",
+                http_status=status,
+            )
+        if 500 <= status <= 599:
+            return SearchError(
+                f"Wallhaven returned HTTP {status}.",
+                code="provider_unavailable",
+                user_message="Wallpaper service temporarily unavailable",
+                http_status=status,
+                retryable=True,
+            )
+        return SearchError(
+            f"Wallhaven rejected the request with HTTP {status}.",
+            code="provider_rejected",
+            user_message="Wallpaper service temporarily unavailable",
+            http_status=status,
+        )
+
+    reason = exc.reason if isinstance(exc, urllib.error.URLError) else exc
+    if isinstance(reason, socket.gaierror):
+        return SearchError(
+            f"DNS resolution failed: {reason}",
+            code="dns_failure",
+            user_message="Network unavailable",
+            retryable=True,
+        )
+    if isinstance(reason, (TimeoutError, socket.timeout)):
+        return SearchError(
+            f"Wallhaven request timed out: {reason}",
+            code="timeout",
+            user_message="Wallpaper service timed out",
+            retryable=True,
+        )
+    if isinstance(exc, (UnicodeDecodeError, json.JSONDecodeError, CandidateRejected)):
+        return SearchError(
+            f"Wallhaven returned malformed data: {exc}",
+            code="malformed_response",
+            user_message="Wallpaper service returned an invalid response",
+        )
+    return SearchError(
+        f"Network request failed: {reason}",
+        code="network_unavailable",
+        user_message="Network unavailable",
+        retryable=True,
+    )
+
+
 def _request_json(
     url: str,
     *,
@@ -559,7 +662,7 @@ def _request_json(
     retries: int,
 ) -> dict[str, Any]:
     deadline = time.monotonic() + total_timeout
-    last_error: Exception | None = None
+    last_error: SearchError | None = None
 
     for attempt in range(retries + 1):
         remaining = deadline - time.monotonic()
@@ -574,7 +677,11 @@ def _request_json(
                 payload = response.read()
             parsed = json.loads(payload.decode("utf-8"))
             if not isinstance(parsed, dict):
-                raise SearchError("Wallhaven returned an invalid response.")
+                raise SearchError(
+                    "Wallhaven returned a non-object JSON response.",
+                    code="malformed_response",
+                    user_message="Wallpaper service returned an invalid response",
+                )
             return parsed
         except (
             urllib.error.URLError,
@@ -584,11 +691,20 @@ def _request_json(
             json.JSONDecodeError,
             CandidateRejected,
         ) as exc:
-            last_error = exc
+            last_error = _classify_provider_error(exc)
+            if not last_error.retryable:
+                break
             if attempt < retries:
                 time.sleep(min(0.25 * (2**attempt), max(0.0, deadline - time.monotonic())))
 
-    raise SearchError(f"Wallhaven request failed: {last_error or 'timeout'}")
+    if last_error is not None:
+        raise last_error
+    raise SearchError(
+        "Wallhaven candidate retrieval timed out.",
+        code="timeout",
+        user_message="Wallpaper service timed out",
+        retryable=True,
+    )
 
 
 def _strategy_counts(candidate_limit: int) -> list[int]:
@@ -1027,6 +1143,143 @@ def search(query_raw: str, env: Mapping[str, str] | None = None) -> list[str]:
         raise
 
 
+def _doctor_result(level: str, label: str, detail: str = "") -> tuple[str, str, str]:
+    return level, label, detail
+
+
+def _doctor_current_generation(layout: CacheLayout) -> list[tuple[str, str, str]]:
+    results: list[tuple[str, str, str]] = []
+    try:
+        target = os.readlink(layout.current)
+    except FileNotFoundError:
+        return [_doctor_result("WARN", "current generation", "no published online generation yet")]
+    except OSError as exc:
+        return [_doctor_result("FAIL", "current generation", str(exc))]
+
+    generation = (layout.online / target).resolve(strict=False)
+    try:
+        generation.relative_to(layout.generations.resolve(strict=False))
+    except ValueError:
+        return [_doctor_result("FAIL", "current generation", "pointer escapes generations directory")]
+
+    required = (
+        generation / "manifest.json",
+        generation / "search_map.txt",
+        generation / "previews",
+    )
+    if not generation.is_dir() or not all(path.exists() for path in required):
+        return [_doctor_result("FAIL", "current generation", f"incomplete: {generation}")]
+
+    try:
+        manifest = json.loads((generation / "manifest.json").read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return [_doctor_result("FAIL", "current manifest", str(exc))]
+
+    if not isinstance(manifest, dict) or manifest.get("status") != "online_results":
+        return [_doctor_result("FAIL", "current manifest", "unexpected manifest status")]
+    if not isinstance(manifest.get("request_id"), int) or not isinstance(manifest.get("results"), list):
+        return [_doctor_result("FAIL", "current manifest", "missing request/result metadata")]
+
+    results.append(_doctor_result(
+        "PASS",
+        "current generation valid",
+        f"{generation.name}; request={manifest['request_id']}; results={len(manifest['results'])}",
+    ))
+    return results
+
+
+def _doctor_provider() -> list[tuple[str, str, str]]:
+    results: list[tuple[str, str, str]] = []
+    try:
+        addresses = socket.getaddrinfo("wallhaven.cc", 443, type=socket.SOCK_STREAM)
+        unique = sorted({entry[4][0] for entry in addresses})
+        results.append(_doctor_result("PASS", "DNS resolution", ", ".join(unique[:3])))
+    except OSError as exc:
+        return [_doctor_result("WARN", "DNS resolution", str(exc))]
+
+    try:
+        context = ssl.create_default_context()
+        with socket.create_connection(("wallhaven.cc", 443), timeout=5) as raw:
+            with context.wrap_socket(raw, server_hostname="wallhaven.cc") as secured:
+                peer = secured.version() or "TLS"
+        results.append(_doctor_result("PASS", "provider HTTPS/TLS", peer))
+    except (OSError, ssl.SSLError) as exc:
+        return results + [_doctor_result("WARN", "provider HTTPS/TLS", str(exc))]
+
+    url = (
+        API_URL
+        + "?q=landscape&purity=100&sorting=relevance&order=desc&per_page=1"
+    )
+    try:
+        with _open_url(url, "api", 6) as response:
+            status = int(getattr(response, "status", 200))
+            response.read(256)
+        results.append(_doctor_result("PASS", "Wallhaven API", f"HTTP {status}"))
+    except urllib.error.HTTPError as exc:
+        status = int(exc.code)
+        detail = "provider temporarily unavailable" if status == 429 or status >= 500 else "provider rejected diagnostic request"
+        results.append(_doctor_result("WARN", "Wallhaven API", f"HTTP {status}; {detail}"))
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        results.append(_doctor_result("WARN", "Wallhaven API", str(exc)))
+    return results
+
+
+def doctor(env: Mapping[str, str] | None = None) -> int:
+    layout = CacheLayout.from_environment(env)
+    results: list[tuple[str, str, str]] = []
+    results.append(_doctor_result(
+        "PASS",
+        "Python runtime",
+        f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+    ))
+
+    cache_probe = layout.root if layout.root.exists() else layout.root.parent
+    if cache_probe.exists() and os.access(cache_probe, os.R_OK | os.W_OK | os.X_OK):
+        results.append(_doctor_result("PASS", "cache root accessible", str(layout.root)))
+    else:
+        results.append(_doctor_result("FAIL", "cache root accessible", str(layout.root)))
+
+    if layout.authority.exists():
+        try:
+            request_id = int(layout.authority.read_text(encoding="utf-8").strip())
+            if request_id < 0:
+                raise ValueError("negative request ID")
+            results.append(_doctor_result("PASS", "authoritative request valid", str(request_id)))
+        except (OSError, ValueError) as exc:
+            results.append(_doctor_result("FAIL", "authoritative request valid", str(exc)))
+    else:
+        results.append(_doctor_result("WARN", "authoritative request", "not initialized yet"))
+
+    results.extend(_doctor_current_generation(layout))
+
+    partials: list[str] = []
+    if layout.generations.is_dir():
+        active = None
+        with contextlib.suppress(OSError):
+            active = (layout.online / os.readlink(layout.current)).resolve(strict=False)
+        for generation in layout.generations.iterdir():
+            if not generation.is_dir() or generation.resolve(strict=False) == active:
+                continue
+            if not (generation / "manifest.json").is_file():
+                partials.append(generation.name)
+    if partials:
+        results.append(_doctor_result("WARN", "partial generations", ", ".join(sorted(partials)[:5])))
+    else:
+        results.append(_doctor_result("PASS", "partial generations", "none detected"))
+
+    preview_pipeline = Path(__file__).with_name("preview_pipeline.py")
+    if preview_pipeline.is_file() and os.access(preview_pipeline, os.R_OK):
+        results.append(_doctor_result("PASS", "preview/download pipeline", str(preview_pipeline)))
+    else:
+        results.append(_doctor_result("FAIL", "preview/download pipeline", "preview_pipeline.py unavailable"))
+
+    results.extend(_doctor_provider())
+    for level, label, detail in results:
+        suffix = f"  {detail}" if detail else ""
+        print(f"{level:<5} {label}{suffix}")
+    return 2 if any(level == "FAIL" for level, _, _ in results) else 0
+
+
 def parse_args(argv: list[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(add_help=True)
     parser.add_argument(
@@ -1043,7 +1296,11 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
-    args = parse_args(sys.argv[1:] if argv is None else argv)
+    raw_args = sys.argv[1:] if argv is None else argv
+    if raw_args == ["doctor"]:
+        return doctor()
+
+    args = parse_args(raw_args)
     layout = CacheLayout.from_environment()
 
     try:

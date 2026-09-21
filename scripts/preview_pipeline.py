@@ -196,6 +196,7 @@ def download_ranked_previews(
     layout: CacheLayout | None = None,
     request_id: int | None = None,
     fetcher: Any = fetch_image_bytes,
+    stats: dict[str, int] | None = None,
 ) -> list[Candidate]:
     """Download bounded ranked waves until enough previews validate."""
     selected: list[tuple[int, Candidate]] = []
@@ -228,8 +229,14 @@ def download_ranked_previews(
             ]
             for future in concurrent.futures.as_completed(futures):
                 result = future.result()
+                if stats is not None:
+                    stats["attempted"] = stats.get("attempted", 0) + 1
                 if result is not None:
                     selected.append(result)
+                    if stats is not None:
+                        stats["succeeded"] = stats.get("succeeded", 0) + 1
+                elif stats is not None:
+                    stats["failed"] = stats.get("failed", 0) + 1
 
         selected.sort(key=lambda item: item[0])
 
@@ -360,6 +367,18 @@ def search(query_raw: str, env: Mapping[str, str] | None = None) -> list[str]:
     layout.generations.mkdir(parents=True, exist_ok=True)
 
     request_id = core.claim_request(layout)
+    started = time.monotonic()
+
+    def log(stage: str, **detail: Any) -> None:
+        with contextlib.suppress(OSError, TypeError, ValueError):
+            core.append_diagnostic(layout, {
+                "request_id": request_id,
+                "query": query,
+                "provider": "wallhaven",
+                "stage": stage,
+                **detail,
+            })
+
     generation = Path(
         tempfile.mkdtemp(
             prefix=f"{request_id:012d}-",
@@ -368,20 +387,51 @@ def search(query_raw: str, env: Mapping[str, str] | None = None) -> list[str]:
     )
     previews = generation / "previews"
     previews.mkdir()
+    log("REQUESTED", generation_id=generation.name)
 
     try:
+        log("PROVIDER_CONNECTING")
         payloads = core.retrieve_payloads(query, config)
+        candidate_count = sum(
+            len(payload.get("data", []))
+            for payload in payloads.values()
+            if isinstance(payload, dict)
+            and isinstance(payload.get("data"), list)
+        )
+        log("PROVIDER_RESPONSE", candidate_count=candidate_count)
+
         ranked = core.rank_payloads(payloads, config)
+        log("RANKING", accepted_candidate_count=len(ranked))
+        if not ranked:
+            raise SearchError(
+                "No ranked online matches were returned.",
+                code="empty",
+                user_message="No online matches",
+            )
+
+        preview_stats: dict[str, int] = {}
+        log("PREVIEWING", ranked_candidate_count=len(ranked))
         published = download_ranked_previews(
             ranked,
             previews,
             config,
             layout=layout,
             request_id=request_id,
+            stats=preview_stats,
         )
         if not published:
-            raise SearchError("No valid online previews were returned.")
+            raise SearchError(
+                "No valid online previews were returned.",
+                code="preview_failed",
+                user_message="Search results could not be prepared",
+            )
 
+        log(
+            "PUBLISHING",
+            accepted_result_count=len(published),
+            preview_success_count=preview_stats.get("succeeded", 0),
+            preview_failure_count=preview_stats.get("failed", 0),
+        )
         manifest = {
             "schema_version": 1,
             "request_id": request_id,
@@ -405,11 +455,67 @@ def search(query_raw: str, env: Mapping[str, str] | None = None) -> list[str]:
             ),
         )
         publish_generation(layout, request_id, generation)
+        log(
+            "PUBLISHED",
+            generation_id=generation.name,
+            publication_status="current",
+            authoritative=True,
+            accepted_result_count=len(published),
+            preview_success_count=preview_stats.get("succeeded", 0),
+            preview_failure_count=preview_stats.get("failed", 0),
+            total_latency_ms=round((time.monotonic() - started) * 1000),
+            terminal_outcome="success",
+        )
         return [
             f"{candidate.file_name}|{candidate.full_url}"
             for candidate in published
         ]
-    except BaseException:
+    except StaleRequest:
+        log(
+            "STALE_REJECTED",
+            generation_id=generation.name,
+            publication_status="rejected",
+            authoritative=False,
+            total_latency_ms=round((time.monotonic() - started) * 1000),
+            terminal_outcome="stale_request",
+        )
+        shutil.rmtree(generation, ignore_errors=True)
+        raise
+    except SearchError as exc:
+        provider_codes = {
+            "provider_rate_limited",
+            "provider_unavailable",
+            "provider_rejected",
+            "network_unavailable",
+            "dns_failure",
+            "timeout",
+            "malformed_response",
+        }
+        if exc.code in provider_codes:
+            log(
+                "PROVIDER_RESPONSE",
+                http_status=exc.http_status,
+                outcome="error",
+                error_code=exc.code,
+            )
+        log(
+            "EMPTY" if exc.code == "empty" else "FAILED",
+            generation_id=generation.name,
+            publication_status="not_published",
+            authoritative=core.is_authoritative(layout, request_id),
+            http_status=exc.http_status,
+            total_latency_ms=round((time.monotonic() - started) * 1000),
+            terminal_outcome=exc.code,
+        )
+        shutil.rmtree(generation, ignore_errors=True)
+        raise
+    except BaseException as exc:
+        log(
+            "FAILED",
+            total_latency_ms=round((time.monotonic() - started) * 1000),
+            terminal_outcome="internal_error",
+            error_type=type(exc).__name__,
+        )
         shutil.rmtree(generation, ignore_errors=True)
         raise
 
@@ -450,7 +556,7 @@ def main(argv: list[str] | None = None) -> int:
     except StaleRequest:
         return 75
     except SearchError as exc:
-        print(str(exc), file=sys.stderr)
+        print(core.cli_error_line(exc), file=sys.stderr)
         return 2
     except KeyboardInterrupt:
         return 130
