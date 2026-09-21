@@ -232,6 +232,26 @@ An explicit online search sends the normalized query and configured display cons
 
 Local wallpaper filenames and personal account data are not transmitted. No Wallhaven account, API key, cloud AI service or GPU model is required.
 
+## Diagnostics and provider failures
+
+Run the read-only diagnostic without changing wallpaper state or request authority:
+
+```bash
+python3 scripts/wallpaper_search.py doctor
+```
+
+It checks the local runtime, cache accessibility, authoritative request state, current generation and manifest, abandoned partial generations, preview/download pipeline, DNS, TLS and Wallhaven API status. Provider warnings are reported separately from local picker failures, so an HTTP 503 can be diagnosed as an unhealthy external dependency while the local picker remains healthy.
+
+Each online request also appends bounded JSONL lifecycle events to:
+
+```text
+<cache-root>/online/search-events.jsonl
+```
+
+The log rotates to `search-events.jsonl.1` when it reaches its bounded size. Events record request ID, normalized query, provider, lifecycle stage, applicable HTTP status, candidate/result and preview counts, generation identity, publication/authority outcome, latency and terminal outcome. API response bodies are never logged.
+
+The default retry budget is one retry. HTTP 500/502/503/504, connection resets, DNS/network failures and timeouts are retryable within the existing total deadline with bounded exponential backoff. HTTP 429 and permanent provider rejections are not blindly retried. Malformed provider responses are not retried. No retry loop is unbounded.
+
 ## Troubleshooting
 
 ### No local thumbnails
