@@ -10,21 +10,6 @@ FloatingWindow {
     title: "wallpaper-picker"
     color: "transparent"
 
-    property string onlineSearchScript: {
-        let path = Qt.resolvedUrl("scripts/online_search.sh").toString()
-        return path.startsWith("file://")
-            ? decodeURIComponent(path.substring(7))
-            : path
-    }
-
-    function invalidateOnlineSearch() {
-        Quickshell.execDetached([
-            "bash",
-            root.onlineSearchScript,
-            "--invalidate"
-        ])
-    }
-
     onVisibleChanged: {
         if (!visible) {
             Qt.quit()
@@ -47,20 +32,13 @@ FloatingWindow {
         enabled: picker.currentFilter === "Search"
                  && !picker.isApplying
                  && !picker.isSearchingOnline
-        onActivated: {
-            const normalized = String(picker.searchQuery || "").trim()
-            if (normalized !== "") {
-                picker.triggerOnlineSearch(normalized)
-            }
-        }
+        onActivated: picker.submitOnlineSearch()
     }
 
     WallpaperPicker {
         id: picker
         anchors.fill: parent
         focus: true
-
-        onSearchQueryChanged: root.invalidateOnlineSearch()
     }
 
     Rectangle {

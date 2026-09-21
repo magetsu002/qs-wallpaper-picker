@@ -92,6 +92,10 @@ Item {
     property bool isOnlineSearch: false
     property bool isSearchingOnline: false
     property string onlineSearchError: ""
+    property int onlineSearchEpoch: 0
+    property int activeOnlineSearchEpoch: 0
+    property string pendingOnlineSearchQuery: ""
+    property bool onlineSearchStartedFromPublishedResults: false
     property bool isSearchPaused: false
     property bool hasSearched: false 
     property var colorMap: ({})
@@ -621,37 +625,23 @@ Item {
         window.visibleItemCount = count;
     }
 
-    function triggerLocalSearch() {
-        if (searchInput.text.trim() === "") return;
+    function submitOnlineSearch() {
+        const normalized = String(window.searchQuery || "").trim().toLowerCase()
+        if (normalized === "") return
 
-        window.isModelChanging = true;
+        window.lastSearchName = ""
+        searchState.lastName = ""
+        window.currentFilter = "Search"
+        window.searchIndexRestored = true
+        window.hasSearched = true
+        window.isSearchPaused = true
+        window.searchQuery = normalized
+        searchState.searched = true
+        searchState.query = normalized
 
-        window.lastSearchName = "";
-        searchState.lastName = "";
-
-        window.currentFilter = "Search";
-        window.searchIndexRestored = true;
-        window.isOnlineSearch = false;
-        window.hasSearched = true;
-        window.isSearchPaused = true;
-        window.searchQuery = searchInput.text.trim().toLowerCase();
-        searchState.searched = true;
-        searchState.query = window.searchQuery;
-
-        view.currentIndex = 0;
-        view.positionViewAtIndex(0, ListView.Center);
-
-        window.isModelChanging = false;
-
-        window.updateVisibleCount();
-        window.applyFilters(true);
-
-        if (window.visibleItemCount === 0) {
-            window.triggerOnlineSearch(window.searchQuery);
-        }
-
-        searchInput.focus = false;
-        view.forceActiveFocus();
+        window.triggerOnlineSearch(normalized)
+        searchInput.focus = false
+        view.forceActiveFocus()
     }
 
     readonly property string homeDir: "file://" + Quickshell.env("HOME")
@@ -835,49 +825,130 @@ Item {
         id: onlineSearchProcess
 
         stdout: StdioCollector {
-            onStreamFinished: {
-                window.applyOnlineResults(this.text)
-            }
+            id: onlineSearchStdout
+        }
+
+        stderr: StdioCollector {
+            id: onlineSearchStderr
         }
 
         onExited: (exitCode, exitStatus) => {
-            if (exitCode !== 0) {
-                window.isSearchingOnline = false
-                window.isOnlineSearch = false
-                window.onlineSearchError = "Online search failed"
-
-                localProxyModel.clear()
-                window.syncLocalModel()
-                window.updateVisibleCount()
+            if (window.activeOnlineSearchEpoch !== window.onlineSearchEpoch) {
+                if (window.pendingOnlineSearchQuery !== "") {
+                    const nextQuery = window.pendingOnlineSearchQuery
+                    window.pendingOnlineSearchQuery = ""
+                    Qt.callLater(() => window.triggerOnlineSearch(nextQuery))
+                }
+                return
             }
+
+            window.isSearchingOnline = false
+
+            if (exitCode === 0) {
+                window.applyOnlineResults(onlineSearchStdout.text)
+                return
+            }
+
+            if (exitCode === 75) {
+                return
+            }
+
+            window.isOnlineSearch =
+                window.onlineSearchStartedFromPublishedResults
+            window.onlineSearchError =
+                window.onlineSearchErrorMessage(onlineSearchStderr.text)
+            window.updateVisibleCount()
+            view.forceActiveFocus()
         }
     }
 
-    function triggerOnlineSearch(query) {
-        const normalized = String(query || "").trim()
-
-        if (normalized === "" || onlineSearchProcess.running) {
-            return
-        }
-
-        window.isOnlineSearch = true
-        window.isSearchingOnline = true
-        window.onlineSearchError = ""
-
+    function onlineSearchScriptPath() {
         let scriptPath =
             Qt.resolvedUrl("scripts/online_search.sh").toString()
-
         if (scriptPath.startsWith("file://")) {
             scriptPath =
                 decodeURIComponent(scriptPath.substring(7))
         }
+        return scriptPath
+    }
+
+    function cancelOnlineSearch() {
+        if (!window.isSearchingOnline && !onlineSearchProcess.running) {
+            return
+        }
+
+        if (onlineSearchProcess.running
+                && window.activeOnlineSearchEpoch !== window.onlineSearchEpoch) {
+            window.pendingOnlineSearchQuery = ""
+            window.isSearchingOnline = false
+            return
+        }
+
+        window.onlineSearchEpoch += 1
+        window.pendingOnlineSearchQuery = ""
+        Quickshell.execDetached([
+            "bash",
+            window.onlineSearchScriptPath(),
+            "--invalidate"
+        ])
+        window.isSearchingOnline = false
+    }
+
+    function onlineSearchErrorMessage(text) {
+        const lines = String(text || "").split("\n")
+        for (let i = 0; i < lines.length; i++) {
+            if (!lines[i].startsWith("MAHO_WALLPAPER_ERROR|")) {
+                continue
+            }
+            const parts = lines[i].split("|")
+            if (parts.length >= 3) {
+                return parts.slice(2).join("|").trim()
+            }
+        }
+
+        const lower = String(text || "").toLowerCase()
+        if (lower.includes("503") || lower.includes("service unavailable")) {
+            return "Wallpaper service temporarily unavailable"
+        }
+        if (lower.includes("429") || lower.includes("too many requests")) {
+            return "Wallpaper service temporarily unavailable"
+        }
+        if (lower.includes("timed out") || lower.includes("timeout")) {
+            return "Wallpaper service timed out"
+        }
+        if (lower.includes("name resolution") || lower.includes("network")) {
+            return "Network unavailable"
+        }
+        return "Online search failed"
+    }
+
+    function triggerOnlineSearch(query) {
+        const normalized = String(query || "").trim()
+        if (normalized === "") {
+            return
+        }
+
+        if (onlineSearchProcess.running) {
+            window.pendingOnlineSearchQuery = normalized
+            window.isSearchingOnline = true
+            window.onlineSearchError = ""
+            return
+        }
+
+        window.pendingOnlineSearchQuery = ""
+        window.onlineSearchStartedFromPublishedResults =
+            window.isOnlineSearch && localProxyModel.count > 0
+        window.onlineSearchEpoch += 1
+        window.activeOnlineSearchEpoch = window.onlineSearchEpoch
+        window.isOnlineSearch = true
+        window.isSearchingOnline = true
+        window.onlineSearchError = ""
 
         onlineSearchProcess.command = [
             "bash",
-            scriptPath,
+            window.onlineSearchScriptPath(),
             normalized
         ]
-
         onlineSearchProcess.running = true
     }
 
@@ -1843,9 +1914,8 @@ Item {
                     clip: true
                     
                     onTextEdited: {
-                        if (window.isSearchingOnline) {
-                            onlineSearchProcess.running = false
-                            window.isSearchingOnline = false
+                        if (window.isSearchingOnline || onlineSearchProcess.running) {
+                            window.cancelOnlineSearch()
                         }
 
                         if (window.isOnlineSearch) {
@@ -1871,9 +1941,7 @@ Item {
                     }
                     
                     onAccepted: {
-                        window.triggerLocalSearch();
-                        searchInput.focus = false; 
-                        view.forceActiveFocus();
+                        window.submitOnlineSearch()
                     }
                 }
 
