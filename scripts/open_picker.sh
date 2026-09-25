@@ -16,7 +16,22 @@ source "$SCRIPT_DIR/cache_paths.sh"
 
 WALLPAPER_DIR="${QS_WALLPAPER_DIR:-$HOME/Wallpapers}"
 STATE_DIR="$(wallpaper_cache_dir)"
+SETTINGS_FILE="$PROJECT_DIR/config/Settings.qml"
+SETTINGS_TEMPLATE="$PROJECT_DIR/config/Settings.qml.example"
 
+ensure_settings() {
+    [ -f "$SETTINGS_FILE" ] && return 0
+    [ -f "$SETTINGS_TEMPLATE" ] || {
+        echo "qs-wallpaper-picker: missing settings template: $SETTINGS_TEMPLATE" >&2
+        return 1
+    }
+
+    local tmp="$SETTINGS_FILE.tmp.$$"
+    cp -- "$SETTINGS_TEMPLATE" "$tmp"
+    mv -- "$tmp" "$SETTINGS_FILE"
+}
+
+ensure_settings
 ensure_wallpaper_cache_compatibility
 mkdir -p "$WALLPAPER_DIR" "$STATE_DIR"
 
